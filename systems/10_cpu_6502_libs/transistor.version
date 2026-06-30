@@ -1,0 +1,7 @@
+{
+  global:
+    transistor_init;
+    transistor_execute_instruction;
+  local:
+    *;
+};

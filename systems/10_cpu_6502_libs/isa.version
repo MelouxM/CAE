@@ -1,0 +1,8 @@
+{
+  global:
+    isa_init;
+    isa_poke;
+    isa_execute_instruction;
+  local:
+    *;
+};

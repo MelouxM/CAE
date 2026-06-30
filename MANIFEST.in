@@ -1,0 +1,23 @@
+# Source-distribution contents.
+#
+# The wheel ships only the importable package. This file controls what the
+# sdist additionally carries, so it stays small, predictable, and reproducible.
+
+include LICENSE
+include THIRD_PARTY
+include README.md
+include CONTRIBUTING.md
+include requirements.lock
+include pyproject.toml
+include causal_abstraction/py.typed
+
+# The benchmark systems, evaluation suites, paper sources, diagrams, legacy code,
+# and build output are intentionally not part of the distribution.
+prune systems
+prune test
+prune paper
+prune svg
+prune old
+prune build
+
+global-exclude __pycache__ *.py[cod]

@@ -1,0 +1,14 @@
+# Core runtime dependencies (mirror of pyproject.toml [project.dependencies]).
+# pyproject.toml is authoritative; install optional groups with `pip install .[<extra>]`.
+numpy>=2.2,<3
+scipy>=1.16,<2
+tqdm>=4.67,<5
+joblib>=1.5,<2
+
+# Optional, per system / use case (the pyproject.toml extras):
+# torch>=2.7,<3              # neural
+# numba>=0.61.2,<0.62        # physics (0.x pkg, numpy-coupled; see pyproject.toml)
+# PySpice>=1.5,<2            # circuit
+# tracr @ git+https://github.com/google-deepmind/tracr.git   # tracr (not on PyPI; from Git)
+# matplotlib>=3.10,<4        # figures
+# pytest>=8.4,<9             # dev

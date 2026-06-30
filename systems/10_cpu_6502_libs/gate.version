@@ -1,0 +1,8 @@
+{
+  global:
+    gate_init;
+    gate_poke;
+    gate_execute_instruction;
+  local:
+    *;
+};

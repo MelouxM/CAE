@@ -1,0 +1,79 @@
+[build-system]
+# Required for the PEP 639 SPDX `license` expression and `license-files` keys used below.
+requires = ["setuptools>=77.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "causal_abstraction_eval"
+version = "1.0.0"
+description = "A framework for evaluating the validity of causal abstractions in complex systems."
+readme = "README.md"
+authors = [
+  { name = "Maxime Méloux", email = "maxime.meloux@univ-grenoble-alpes.fr" },
+  { name = "Tiago Pimentel", email = "tiago.pimentel@inf.ethz.ch" },
+  { name = "François Portet", email = "portetf@univ-grenoble-alpes.fr" },
+  { name = "Maxime Peyrard", email = "peyrardm@univ-grenoble-alpes.fr" },
+]
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# Library specifiers are deliberately loose (>=tested-minor,<next-major).
+dependencies = [
+    "numpy>=2.2,<3",
+    "scipy>=1.16,<2",
+    "tqdm>=4.67,<5",
+    "joblib>=1.5,<2",
+]
+# scipy>=1.16 requires Python >=3.11
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+neural = ["torch>=2.7,<3"]
+# 0.61.2 is the first 0.61.x to support numpy 2.2.
+physics = ["numba>=0.61.2,<0.62"]
+circuit = ["PySpice>=1.5,<2"]
+# tracr (DeepMind's RASP->transformer compiler, used by system 8) is not on PyPI,
+# so it is not an extra. Install it manually:
+#     pip install git+https://github.com/google-deepmind/tracr.git
+# Plotting stack for the test/figures/get_figure_*.py figure generators.
+figures = ["matplotlib>=3.10,<4"]
+# Test/dev tooling
+dev = ["pytest>=8.4,<9", "pytest-cov>=5,<7", "ruff>=0.6,<1"]
+all = [
+    "torch>=2.7,<3",
+    "numba>=0.61.2,<0.62",
+    "PySpice>=1.5,<2",
+    "matplotlib>=3.10,<4"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/MelouxM/CAE"
+"Bug Tracker" = "https://github.com/MelouxM/CAE/issues"
+
+[tool.setuptools.packages.find]
+# Ship only the library
+include = ["causal_abstraction*"]
+
+[tool.setuptools.package-data]
+# Ship the PEP 561 marker
+causal_abstraction = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["old", "paper", "svg"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.format]
+docstring-code-format = false

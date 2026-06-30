@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Run the pytest unit suite. We install the `neural` extra so torch is available;
+  # NeuralModel is otherwise lazy-imported and torch is guarded behind try/except in
+  # models/neural.py.
+  test:
+    name: Unit tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package (dev + neural)
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[dev,neural]"
+      - name: Run unit suite
+        run: pytest
+
+  # Import matrix: confirm `import causal_abstraction` succeeds for the bare
+  # install and for each extra that installs cleanly from PyPI wheels. The
+  # `circuit` extra (PySpice -> ngspice system library) and the manually
+  # installed `tracr` (a git-only package) are deliberately excluded here.
+  import-matrix:
+    name: Import (${{ matrix.extra || 'base' }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        extra: ["", "neural", "physics", "figures"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          if [ -n "${{ matrix.extra }}" ]; then
+            pip install ".[${{ matrix.extra }}]"
+          else
+            pip install .
+          fi
+      - name: Import package
+        run: python -c "import causal_abstraction; print('import OK:', causal_abstraction.__name__)"
