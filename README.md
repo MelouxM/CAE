@@ -1,5 +1,6 @@
 # Causal Abstraction Framework
 
+[![PyPI](https://img.shields.io/pypi/v/causal-abstraction-eval.svg)](https://pypi.org/project/causal-abstraction-eval/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A Python framework for **validating causal abstractions on simulated complex systems**. It accompanies
@@ -42,7 +43,7 @@ discriminate valid from invalid abstractions.
 
 ### Installation
 
-Install the latest release from PyPI:
+Install the latest release from [PyPI](https://pypi.org/project/causal-abstraction-eval/):
 
 ```bash
 pip install causal_abstraction_eval
