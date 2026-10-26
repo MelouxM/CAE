@@ -7,42 +7,25 @@ For each SEQ_LEN in SEQ_LENS we:
   3. Define a WRONG high-level model representing a specific wrong explanation hypothesis:
        rank_0 = seq_len - 1  when token_0 is the minimum-value token
                (correct formula)  otherwise
-     This is wrong only for the "token_0 is minimum" input pattern, which
-     occurs with probability exactly 1/seq_len for uniform token sampling.
+     This is wrong only when token_0 is a minimum (ties included).
   4. For each n in N_GRID, run CAE_down_nf/CAE_up_nf/CAE_down/CAE_up n_samples=n times.
 
-Design rationale:
-Wrong hypothesis with stochastic triggering:
-  * valid condition:  score = 0.0 always (high-level model and low-level model always agree)
-  * wrong condition:  score = 1/seq_len with prob 1/seq_len, else 0.0
-    → power(n) = 1 − (1 − 1/seq_len)^n  (geometric distribution)
-    → n for 95% power ≈ 3 × seq_len  (linear growth with program size)
+Tokens are i.i.d. uniform on seq_len + 2 values, so the wrong condition triggers with
+probability p = sum_{k=1}^{V} k^(seq_len-1) / V^seq_len (V = seq_len + 2), about
+1.5 / seq_len. The number of interventions for 95% power is log(0.05) / log(1 - p),
+about 1.9 * seq_len.
 
-Tracr precision:
-Tracr's SelectorWidth sums ~seq_len soft attention weights, each with a small
-error from the mlp_exactness sigmoid approximation.  For seq_len ≥ 12, the
-default mlp_exactness=100 is insufficient: errors accumulate and roughly
-10–30% of decoded rank values are wrong, giving valid-condition scores of 0.1–0.3.
-
-Since the wrong-hypothesis signal is only 1/seq_len ≈ 8% for seq_len=12, a
-valid noise floor of 0.1 completely buries it, making detection impossible.
-
-Fix: we scale mlp_exactness = 30 × seq_len (300 for seq_len=10, 450 for 15).
-A validation step after compilation measures empirical Tracr accuracy and warns
-if it is below 99%.
-
-The existing data for seq_len=2–10 (mlp_exactness=100 was sufficient) is
-unaffected.  Only seq_len=12/15 need to be recompiled with higher exactness.
-Delete or reset those entries in the JSON before restarting, or pass
---seq-lens 12 15 --reset-low_level_model to force recompilation.
+mlp_exactness is set to 30 * seq_len: with Tracr's default (100), the rank outputs get
+noisy for seq_len >= 12 and bury the signal. Each compiled model is checked for
+accuracy and a warning is printed below 99%.
 
 JSON format:
     data[str(seq_len)][condition][metric][str(n)] = [score_run0, score_run1, ...]
 condition ∈ {"valid", "wrong"}, metric ∈ {"CAE_down_nf", "CAE_up_nf", "CAE_down", "CAE_up"}.
 
 Usage:
-    python power_tracr_scaling.py                           # run forever
-    python power_tracr_scaling.py --seq-lens 2 3 4 5 6     # subset
+    python test/tracr_size.py --runs 100
+    python test/tracr_size.py --seq-lens 2 3 4 5 6     # subset
     python power_tracr_scaling.py --runs 50                 # stop after 50 rounds
     python power_tracr_scaling.py --seq-lens 12 15          # resume large seq_lens
 """
@@ -77,7 +60,7 @@ RESULTS_FILE = _test_dir / "results" / "power_tracr_scaling.json"
 # Compilation time grows with seq_len; allow 1–5 minutes per model for seq_len ≥ 10.
 SEQ_LENS = [2, 3, 4, 5, 6, 8, 10, 12, 15]
 
-# N_GRID covers the full expected detection range (analytic ≈ 3 × seq_len for 95%).
+# N_GRID covers the expected detection range (about 1.9 * seq_len for 95% power)
 N_GRID = [2, 4, 6, 8, 10, 12, 15, 20, 25, 30, 40, 50, 75]
 
 TARGET_RUNS = 100
@@ -116,10 +99,8 @@ def _validate_low_level_model(low_level_model: "TracrScalingLowLevelModel", seq_
     Returns the fraction of random inputs where the low-level model output matches the
     exact sort-rank formula.  Prints a warning if accuracy < 99%.
 
-    A valid score of 0 in the experiment requires accuracy ≈ 100%, because
-    any low-level model error directly adds to the valid-condition hard-metric score.
-    If accuracy is 90%, the valid floor is ~10%, which can swamp the
-    wrong-hypothesis signal of 1/seq_len ≈ 7–8% for seq_len=12–15.
+    Any decoding error raises the valid score, which can hide the small signal of
+    the wrong condition at large seq_len.
     """
     rng        = np.random.default_rng(seed=42)
     vocab_list = sorted(vocab)
@@ -145,7 +126,6 @@ def _validate_low_level_model(low_level_model: "TracrScalingLowLevelModel", seq_
         print(
             f"  WARNING: Tracr accuracy = {accuracy:.1%} for seq_len={seq_len}.\n"
             f"  Valid-condition scores will be ~{1 - accuracy:.0%} instead of 0.\n"
-            f"  The wrong-hypothesis signal is only 1/seq_len = {1/seq_len:.1%}.\n"
             f"  At this accuracy, detection may be impossible: the noise floor\n"
             f"  exceeds the signal. Increase mlp_exactness or reduce seq_len.",
             flush=True,
@@ -204,7 +184,7 @@ class TracrScalingLowLevelModel(LowLevelModel):
         all_ranks = np.zeros((batch_size, self.seq_len), dtype=float)
 
         for b in range(batch_size):
-            # Micro-value v−1 → vocab label v; clip to valid vocab range.
+            # Micro-value v−1 → vocab label v; clip to valid vocab range
             vocab_labels = [
                 int(np.clip(round(token_array[b, i]) + 1,
                             self.vocab_min, self.vocab_max))
@@ -212,7 +192,7 @@ class TracrScalingLowLevelModel(LowLevelModel):
             ]
             output    = self.compiled.apply([self.bos] + vocab_labels)
             decoded   = output.decoded[1:]   # strip BOS
-            # Round to nearest integer: eliminates floating-point bin-boundary UNMAPPED.
+            # Round to nearest integer: eliminates floating-point bin-boundary UNMAPPED
             all_ranks[b] = np.round(np.array(decoded, dtype=float))
 
         return input_state.merge(SystemState(values={
@@ -222,7 +202,7 @@ class TracrScalingLowLevelModel(LowLevelModel):
 
 
 # Compile each Tracr model once per process (compilation can take several minutes
-# for larger seq_lens).
+# for larger seq_lens)
 _compiled_cache: Dict[int, object]          = {}
 _low_level_model_cache:      Dict[int, TracrScalingLowLevelModel] = {}
 
@@ -273,9 +253,9 @@ def _build_maps(seq_len: int) -> Tuple[CoarseGrainingMap, ValueMap]:
 
     cg_map = CoarseGrainingMap(schema, cg_mapping)
 
-    # Token label v → micro-value ≈ v−1.
+    # Token label v → micro-value ≈ v−1
     tok_specs  = {v: RectSubspace((v - 1 - 0.5, v - 1 + 0.5)) for v in vocab}
-    # Rank label r → micro-value = r (integer after rounding).
+    # Rank label r → micro-value = r (integer after rounding)
     rank_specs = {r: RectSubspace((r - 0.5, r + 0.5)) for r in range(seq_len)}
 
     var_specs: Dict[str, dict] = {}
@@ -296,17 +276,9 @@ def _build_high_level_model(seq_len: int, wrong: bool = False) -> CausalGraph:
             rank_0 = correct_rank_0  otherwise
             rank_i = #{j ≠ i : token_j < token_i}  for i > 0  (correct)
 
-    The wrong hypothesis triggers when token_0 is the minimum-value token,
-    which happens with probability ≈ 1/seq_len under uniform token sampling.
-    When triggered: wrong_rank_0 = seq_len−1 (max) while low-level model gives 0 (min).
-    This gives power(n) = 1 − (1 − 1/seq_len)^n, a clean geometric curve.
-
-    The conceptual mistake encoded: "the minimum-value token at position 0
-    always gets the highest rank", exactly the opposite of the correct LT rule.
-
-    Choosing a wrong hypothesis with p ≈ 1/seq_len means:
-      • Larger programs → lower detection probability per sample → more samples needed.
-      • Required n ≈ 3 × seq_len for 95% power → linear growth.
+    The wrong model triggers when token_0 is a minimum (ties included), with
+    probability about 1.5 / seq_len (see the module docstring). Then it predicts
+    rank seq_len - 1 where the transformer gives 0, so power(n) = 1 - (1 - p)^n.
     """
     vocab     = _vocab_for(seq_len)
     tok_dist  = {v: 1 / len(vocab) for v in vocab}
@@ -332,7 +304,7 @@ def _build_high_level_model(seq_len: int, wrong: bool = False) -> CausalGraph:
                     if j != pos and kwargs[f"token_{j}"] < token_i
                 )
                 if apply_wrong and correct == 0:
-                    # Wrong hypothesis: predict max rank when the correct rank is 0.
+                    # Wrong hypothesis: predict max rank when the correct rank is 0
                     return sl - 1
                 return correct
             return eq
@@ -467,7 +439,7 @@ def run_scaling_suite(
     print(f"  mlp_exactness per seq_len: "
           + ", ".join(f"{sl}→{_mlp_exactness_for(sl)}" for sl in seq_lens))
     print(f"  Wrong hypothesis: rank_0 = seq_len−1 when token_0 is minimum.")
-    print(f"  Detection prob per sample = 1/seq_len  →  n_req ≈ 3×seq_len.")
+    print(f"  Detection prob per sample ≈ 1.5/seq_len  →  n_req ≈ 1.9×seq_len.")
     print(f"{'=' * 65}\n")
 
     print("Pre-compiling Tracr models (this may take several minutes)...")
@@ -505,7 +477,7 @@ def run_scaling_suite(
                         result             = cr.engine.run_tasks(tasks, **kwargs)
 
                         n_saved = 0
-                        for name, res in result.items:
+                        for name, res in result.items():
                             _append(data, sl, cond, name, n, float(res.score))
                             n_saved += 1
 

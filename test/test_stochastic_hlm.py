@@ -1,19 +1,19 @@
 """
 Unit tests for opt-in stochastic high-level-model (HLM) support.
 
-These cover the additive ``noise_dist`` / exogenous-noise feature on
-``CausalGraph`` (the high-level model E as a full SCM with ``P_U``):
+These cover the additive `noise_dist` / exogenous-noise feature on
+`CausalGraph` (the high-level model E as a full SCM with `P_U`):
 
 * a regression guard that the deterministic default path is unchanged and a
-  point-mass ``P_U`` reproduces deterministic ``predict`` outputs exactly, plus a
+  point-mass `P_U` reproduces deterministic `predict` outputs exactly, plus a
   pinned end-to-end CAE on the real 2-bit-adder fixture;
 * positive tests that a stochastic node yields its analytically expected
   macro distribution, that draws are reproducible under a seed, that the existing
-  divergence metrics (JSD/MMD) discriminate a wrong ``P_U`` (so no new metric is
+  divergence metrics (JSD/MMD) discriminate a wrong `P_U` (so no new metric is
   needed), and that a stochastic E flows through the real engine.
 
 The deterministic-HLM path must stay byte-for-byte identical; nothing here touches
-metric definitions or any stored ``test/results/*.json``.
+metric definitions or any stored `test/results/*.json`.
 """
 import numpy as np
 import pytest
@@ -46,9 +46,9 @@ def _deterministic_chain():
 
 
 def _pointmass_stochastic_clone(graph):
-    """Clone ``graph`` with a degenerate point-mass ``P_U`` on every node.
+    """Clone `graph` with a degenerate point-mass `P_U` on every node.
 
-    Each equation is wrapped to accept (and ignore) the noise keyword ``u``; the
+    Each equation is wrapped to accept (and ignore) the noise keyword `u`; the
     point mass at 0 makes every draw constant, so outputs must match the
     deterministic original value-for-value.
     """
@@ -62,7 +62,7 @@ def _pointmass_stochastic_clone(graph):
 
 
 def _draw_macro(graph, var, n, seed):
-    """Empirical path-p samples of ``var`` from a stochastic graph under a seed."""
+    """Empirical path-p samples of `var` from a stochastic graph under a seed."""
     rng = np.random.default_rng(seed)
     return np.array([graph.predict({}, rng=rng)[var] for _ in range(n)], dtype=float)
 
@@ -98,11 +98,11 @@ def test_equation_accepts_u():
 def test_deterministic_default_is_not_stochastic_and_unchanged():
     g = _deterministic_chain()
     assert g.is_stochastic is False
-    # predict is unchanged and ignores a passed rng (no draws happen).
+    # predict is unchanged and ignores a passed rng (no draws happen)
     rng = np.random.default_rng(123)
     assert g.predict({"X": 3}) == {"X": 3, "Y": 6}
     assert g.predict({"X": 3}, rng=rng) == {"X": 3, "Y": 6}
-    # The rng must be untouched by a deterministic predict (byte-for-byte path).
+    # The rng must be untouched by a deterministic predict (byte-for-byte path)
     probe = np.random.default_rng(123)
     assert rng.integers(0, 1_000_000) == probe.integers(0, 1_000_000)
 
@@ -134,7 +134,7 @@ def test_stochastic_node_matches_expected_distribution(p1):
                    noise_dist=DiscreteDistribution({0: 1.0 - p1, 1: p1}))
     draws = _draw_macro(g, "Y", n=4000, seed=2024)
     frac1 = float(np.mean(draws == 1.0))
-    # Monte-Carlo tolerance for n=4000 (~3 std ≈ 0.024 at p=0.5).
+    # Monte-Carlo tolerance for n=4000 (~3 std ≈ 0.024 at p=0.5)
     assert abs(frac1 - p1) < 0.03
 
 
@@ -153,13 +153,13 @@ def test_explicit_u_overrides_the_draw():
     g = CausalGraph()
     g.add_variable("Y", equation=lambda u: u, parents=[],
                    noise_dist=DiscreteDistribution({0: 0.5, 1: 0.5}))
-    # Supplying u bypasses the noise_dist draw entirely.
+    # Supplying u bypasses the noise_dist draw entirely
     assert g.predict({}, u={"Y": 1})["Y"] == 1
     assert g.predict({}, u={"Y": 0})["Y"] == 0
 
 
 # Positive: existing divergence metrics consume the macro distribution and
-# discriminate a wrong P_U (confirms no new metric is needed).
+# discriminate a wrong P_U (confirms no new metric is needed)
 
 def test_divergence_metrics_discriminate_wrong_pu():
     e_valid = CausalGraph()
@@ -167,7 +167,7 @@ def test_divergence_metrics_discriminate_wrong_pu():
                          noise_dist=DiscreteDistribution({0: 0.5, 1: 0.5}))
     samples_p = _draw_macro(e_valid, "Y", n=500, seed=1)
 
-    # Matched reference (true P_U) vs a wrong P_U skewed to 0.95.
+    # Matched reference (true P_U) vs a wrong P_U skewed to 0.95
     ref_match = _draw_macro(e_valid, "Y", n=500, seed=2)
     e_wrong = CausalGraph()
     e_wrong.add_variable("Y", equation=lambda u: u, parents=[],
@@ -201,7 +201,7 @@ def test_stochastic_hlm_runs_through_engine(logic_system):
 
 
 def _noisy_clone(graph, p=0.5):
-    """Clone with a real Bernoulli ``P_U`` whose draw perturbs each non-root node,
+    """Clone with a real Bernoulli `P_U` whose draw perturbs each non-root node,
     so the exogenous noise actually changes the macro output through the engine."""
     clone = CausalGraph(list(graph.variables.values()))
     noise = DiscreteDistribution({0: 1.0 - p, 1: p})
@@ -225,5 +225,5 @@ def test_stochastic_hlm_engine_reproducible_under_seed(logic_system):
     second = _cae_scores(noisy, logic_system, seed=0)
     assert first == second                                   # reproducible via threaded seed
     # The injected exogenous noise actually flows through to the macro output:
-    # the otherwise-valid abstraction is now degraded above its deterministic 0.
+    # the otherwise-valid abstraction is now degraded above its deterministic 0
     assert first["CAE_down"] > 0.0

@@ -2,14 +2,14 @@
 Defines the dissimilarity metrics D for evaluating causal abstractions, supporting
 both point-wise comparisons and distributional divergences.
 
-Every metric accepts ``normalize=False`` in its constructor. When ``normalize=True``
-most metrics map ``measure()`` into [0, 1], where 0 = perfect and 1 = maximal error,
-via an affine transform for bounded metrics or ``tanh`` for unbounded ones. This is a
+Every metric accepts `normalize=False` in its constructor. When `normalize=True`
+most metrics map `measure()` into [0, 1], where 0 = perfect and 1 = maximal error,
+via an affine transform for bounded metrics or `tanh` for unbounded ones. This is a
 per-subclass convention, not a guarantee enforced by the base class.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 from scipy.spatial.distance import jensenshannon
@@ -28,9 +28,9 @@ class EvaluationMetric(ABC):
     """
     Abstract base class for measuring the distance/divergence between two outcomes.
 
-    Subclasses implement ``_measure(y_true, y_pred) -> float``.  The public
-    ``measure()`` method calls ``_measure()`` and, when ``normalize=True``,
-    passes the result through ``_normalize_score()`` to obtain a value in
+    Subclasses implement `_measure(y_true, y_pred) -> float`.  The public
+    `measure()` method calls `_measure()` and, when `normalize=True`,
+    passes the result through `_normalize_score()` to obtain a value in
     [0, 1] where 0 = perfect and 1 = maximal error.
     """
     best_value: float = 0.0
@@ -86,7 +86,7 @@ class EvaluationMetric(ABC):
 
     def _normalize_score(self, score: float) -> float:
         """
-        Map score to [0, 1]. Default: ``tanh(score)`` for non-negative,
+        Map score to [0, 1]. Default: `tanh(score)` for non-negative,
         lower-is-better metrics whose range is [0, ∞).
         Overridden in subclasses that need different behavior.
         """
@@ -102,14 +102,14 @@ class PrecisionMetric:
     Measures the specificity of the abstraction mapping.
     Score = 1 - (Volume(Subspace) / Volume(LabeledUnion)), where LabeledUnion is
     the summed volume of the variable's labeled subspaces (passed in as
-    ``total_volume`` by the engine), not the full micro domain.
+    `total_volume` by the engine), not the full micro domain.
     """
 
     def __init__(self, normalize: bool = True):
         self._normalize = normalize  # kept for API consistency; already [0,1]
 
     def measure(self, subspace: Subspace, total_volume: float = 1.0) -> float:
-        """Measure how specific ``subspace`` is within the total domain.
+        """Measure how specific `subspace` is within the total domain.
 
         Args:
             subspace: The micro-subspace associated with a label.
@@ -170,11 +170,11 @@ class SubspaceCheckMetric(EvaluationMetric):
 
 class L2Metric(EvaluationMetric):
     """
-    Relative squared error: mean over samples of ``||y_true - y_pred||^2 / ||y_true||^2``.
+    Relative squared error: mean over samples of `||y_true - y_pred||^2 / ||y_true||^2`.
 
     Despite the "L2" label this is not a Euclidean distance (there is no square root);
     it is an NMSE-like relative squared error. On the 1-D concatenated engine path it
-    collapses to a single global ratio ``sum(diff^2) / sum(y_true^2)``.
+    collapses to a single global ratio `sum(diff^2) / sum(y_true^2)`.
     """
 
     def __init__(self, normalize: bool = True):
@@ -223,7 +223,7 @@ class JSDivergenceMetric(EvaluationMetric):
         self.n_samples = n_samples
         # When True, inputs are treated as categorical probability vectors and
         # compared element-wise; otherwise they are sample arrays binned into a
-        # histogram.
+        # histogram
         self.is_distribution = is_distribution
 
     def _measure(self, y_true: Any, y_pred: Any) -> float:
@@ -251,7 +251,7 @@ class JSDivergenceMetric(EvaluationMetric):
             n = len(v1) + len(v2)
             adaptive_bins = min(self.n_bins, max(2, int(np.ceil(np.log2(n) + 1))))
 
-            # Shared min-data guard with KLDivergenceMetric (≥5 pooled samples/bin).
+            # Shared min-data guard with KLDivergenceMetric (≥5 pooled samples/bin)
             if n < 5 * adaptive_bins:
                 return float('nan')  # Not enough data
 
@@ -282,6 +282,141 @@ class JSDivergenceMetric(EvaluationMetric):
         return score
 
 
+class InstanceJSDMetric(EvaluationMetric):
+    """sqrt(JSD) between the two paths' outputs for one intervention cell (ISIL/IC).
+
+    Each cell gives two distributions over the joint values of the target
+    variables, one per path, estimated from the replicate draws of that cell.
+    The score is the Jensen-Shannon distance in base 2, so it lies in [0, 1]:
+    0 for identical point masses, 1 for point masses on different values.
+    Aggregation over cells (sup or mean) is left to the task.
+
+    Integer-valued variables are compared exactly. Continuous ones need
+    `bin_edges` when there is more than one replicate; with a single replicate
+    they are compared with `rtol` / `atol`.
+
+    Args:
+        bin_edges: Optional `{variable_name: [edges_per_dimension]}` quantization
+            used with `numpy.digitize` before the distributions are formed.
+        rtol: Relative tolerance of the point-mass equality test.
+        atol: Absolute tolerance of the point-mass equality test.
+        normalize: Accepted for API consistency; the score is already in [0, 1].
+    """
+    best_value = 0.0
+    lower_is_better = True
+
+    def __init__(self, bin_edges: Optional[Dict[str, Any]] = None,
+                 rtol: float = 1e-6, atol: float = 1e-12, normalize: bool = True):
+        super().__init__(normalize=normalize)
+        self.bin_edges = dict(bin_edges or {})
+        self.rtol = rtol
+        self.atol = atol
+
+    def _normalize_score(self, score: float) -> float:
+        # sqrt(JSD) with base-2 logs is already in [0, 1]; tanh would distort it
+        return score
+
+    # Helpers
+    @staticmethod
+    def _as_2d(values: Any) -> np.ndarray:
+        """Coerce one variable's per-cell values to a float array of shape (R, K)."""
+        arr = np.asarray(values, dtype=float)
+        if arr.ndim == 0:
+            return arr.reshape(1, 1)
+        if arr.ndim == 1:
+            return arr.reshape(arr.shape[0], 1)
+        return arr.reshape(arr.shape[0], -1)
+
+    def _quantize(self, var_name: str, arr: np.ndarray) -> Optional[np.ndarray]:
+        """Return integer codes for `arr`, or None if no quantization applies."""
+        edges = self.bin_edges.get(var_name)
+        if edges is not None:
+            cols = []
+            for d in range(arr.shape[1]):
+                e = np.asarray(edges[d] if isinstance(edges, (list, tuple)) else edges, dtype=float)
+                cols.append(np.digitize(arr[:, d], e))
+            return np.stack(cols, axis=1)
+        if np.all(np.isfinite(arr)) and np.allclose(arr, np.rint(arr), rtol=0.0, atol=1e-9):
+            return np.rint(arr).astype(np.int64)
+        return None
+
+    def _sqrt_jsd(self, codes_a: np.ndarray, codes_b: np.ndarray) -> float:
+        """sqrt(JSD) between the empirical distributions of two code streams."""
+        keys_a = [tuple(row) for row in codes_a]
+        keys_b = [tuple(row) for row in codes_b]
+        support = sorted(set(keys_a) | set(keys_b))
+        p = np.array([keys_a.count(k) for k in support], dtype=float)
+        q = np.array([keys_b.count(k) for k in support], dtype=float)
+        p /= p.sum()
+        q /= q.sum()
+        # jensenshannon returns the JS distance, sqrt(JSD)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            d = jensenshannon(p, q, base=2.0)
+        if np.isnan(d):
+            return 0.0 if np.array_equal(p, q) else 1.0
+        return float(np.clip(d, 0.0, 1.0))
+
+    # Public API
+    def measure_instance(self, values_a: Dict[str, Any], values_b: Dict[str, Any]) -> float:
+        """sqrt(JSD) between the joint target-set distributions of one cell.
+
+        Args:
+            values_a: `{variable: R values}` produced by the high-level path.
+            values_b: `{variable: R values}` produced by the low-level path.
+
+        Returns:
+            The instance-level abstraction error in [0, 1].
+
+        Raises:
+            ValueError: If a non-integral variable has more than one replicate and
+                no `bin_edges` quantization.
+        """
+        names = sorted(set(values_a) & set(values_b))
+        if not names:
+            return float("nan")
+
+        arrays_a, arrays_b = {}, {}
+        for name in names:
+            a, b = self._as_2d(values_a[name]), self._as_2d(values_b[name])
+            if a.shape != b.shape:
+                return 1.0  # shape mismatch: the paths do not even agree in type
+            arrays_a[name], arrays_b[name] = a, b
+
+        n_rep = arrays_a[names[0]].shape[0]
+
+        if n_rep == 1:
+            # Both sides are point masses: sqrt(JSD) is 0 iff every target
+            # variable agrees, 1 otherwise
+            for name in names:
+                a, b = arrays_a[name], arrays_b[name]
+                codes_a, codes_b = self._quantize(name, a), self._quantize(name, b)
+                if codes_a is not None and codes_b is not None:
+                    if not np.array_equal(codes_a, codes_b):
+                        return 1.0
+                elif not np.allclose(a, b, rtol=self.rtol, atol=self.atol):
+                    return 1.0
+            return 0.0
+
+        joint_a, joint_b = [], []
+        for name in names:
+            codes_a = self._quantize(name, arrays_a[name])
+            codes_b = self._quantize(name, arrays_b[name])
+            if codes_a is None or codes_b is None:
+                raise ValueError(
+                    f"InstanceJSDMetric: variable '{name}' is not label-valued, so "
+                    f"estimating its distribution from {n_rep} replicates requires a "
+                    f"'bin_edges' quantization."
+                )
+            joint_a.append(codes_a)
+            joint_b.append(codes_b)
+        return self._sqrt_jsd(np.concatenate(joint_a, axis=1),
+                              np.concatenate(joint_b, axis=1))
+
+    def _measure(self, y_true: Any, y_pred: Any) -> float:
+        """Single-variable form (no variable name, hence no `bin_edges` lookup)."""
+        return self.measure_instance({"_": y_true}, {"_": y_pred})
+
+
 class KLDivergenceMetric(EvaluationMetric):
     """
     Measures KL-divergence between probability distributions.
@@ -296,7 +431,7 @@ class KLDivergenceMetric(EvaluationMetric):
         self.n_bins = n_bins
         self.n_samples = n_samples
         self.epsilon = epsilon
-        # When True, inputs are treated as discrete probability vectors (see JSDivergenceMetric).
+        # When True, inputs are treated as discrete probability vectors (see JSDivergenceMetric)
         self.is_distribution = is_distribution
 
     def _measure(self, y_true: Any, y_pred: Any) -> float:
@@ -357,7 +492,7 @@ class R2Metric(EvaluationMetric):
     """
     R² coefficient of determination.  Range: (−∞, 1] where 1 = perfect.
 
-    When normalize=True: maps to [0, 1] via ``clip((1 − R²) / 2, 0, 1)``.
+    When normalize=True: maps to [0, 1] via `clip((1 − R²) / 2, 0, 1)`.
     """
     lower_is_better = False
     best_value = 1.0
@@ -615,7 +750,7 @@ class SpectralMetric(EvaluationMetric):
         s2 = np.asarray(y_pred, dtype=float).ravel()
         n = max(len(s1), len(s2))
         # Remove the mean so the DC bin does not dominate, then compare the
-        # oscillation spectrum only (drop the DC bin).
+        # oscillation spectrum only (drop the DC bin)
         s1 = s1 - s1.mean()
         s2 = s2 - s2.mean()
         psd1 = np.abs(np.fft.rfft(s1, n=n)) ** 2
@@ -642,9 +777,9 @@ class ConditionalIndependenceMetric(EvaluationMetric):
     Score is the normalized HSIC, so 0 = perfect
     (residuals fully independent of inputs).
 
-    Naming: this class backs the ``EvaluationConfig(metric='hsic')`` option (see
-    :func:`get_metric`) and the ``"HSIC"`` label used in the results JSON and
-    figures; there is no separate ``HSICMetric`` class.
+    Naming: this class backs the `EvaluationConfig(metric='hsic')` option (see
+    `get_metric`) and the `"HSIC"` label used in the results JSON and
+    figures; there is no separate `HSICMetric` class.
     """
     best_value = 0.0
     lower_is_better = True
@@ -714,7 +849,7 @@ class VarianceDecompositionMetric(EvaluationMetric):
     Note: despite the name, this is a fraction-of-variance-unexplained (NMSE-like)
     statistic, not a Sobol/ANOVA partition of output variance into per-input
     first-order and interaction contributions. That sensitivity partition is
-    implemented separately in ``SobolSensitivityMetric``.
+    implemented separately in `SobolSensitivityMetric`.
     """
     best_value = 0.0
     lower_is_better = True
@@ -745,22 +880,22 @@ class VarianceDecompositionMetric(EvaluationMetric):
 
     def _normalize_score(self, score: float) -> float:
         # The raw unexplained-variance ratio is unbounded above; squash it into
-        # [0, 1) with tanh so the metric honors the module's [0, 1] convention.
+        # [0, 1) with tanh so the metric honors the module's [0, 1] convention
         return float(np.tanh(score))
 
 
 def get_metric(config: EvaluationConfig, normalize: bool = True) -> EvaluationMetric:
-    """Construct the dissimilarity metric D selected by ``config.metric``.
+    """Construct the dissimilarity metric D selected by `config.metric`.
 
     Args:
-        config: Evaluation config whose ``metric`` string selects the class.
+        config: Evaluation config whose `metric` string selects the class.
         normalize: Passed to the metric so its score maps to [0, 1].
 
     Returns:
-        The matching ``EvaluationMetric`` instance.
+        The matching `EvaluationMetric` instance.
 
     Raises:
-        ValueError: If ``config.metric`` is not a recognized metric string.
+        ValueError: If `config.metric` is not a recognized metric string.
     """
     mode = config.metric
     if mode == 'hard':

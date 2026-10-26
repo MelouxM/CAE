@@ -26,16 +26,22 @@ import logging
 from typing import Optional
 
 import numpy as np
-import torch
 
 from causal_abstraction import (
     LowLevelModel, SystemState, InterventionSampler, ContinuousValueMap,
 )
+from causal_abstraction.spaces.base import Subspace
 
 try:
     from numba import njit
 except ImportError:
     def njit(func): return func
+
+
+@njit
+def seed_numba(seed):
+    """Seed the generator used inside Numba-compiled code (separate from NumPy's)."""
+    np.random.seed(seed)
 
 
 @njit
@@ -68,14 +74,17 @@ class BrownianParticleSystem(LowLevelModel):
         self.step_size = np.sqrt(2 * self.alpha * self.dt)
         self.n_steps = n_steps
 
-    def forward_with_interventions(self, input_state: SystemState, interventions: dict) -> SystemState:
+    def forward_with_interventions(self, input_state: SystemState, interventions: dict,
+                                   rng: Optional[np.random.Generator] = None) -> SystemState:
+        gen = rng if rng is not None else np.random.default_rng()
+        seed_numba(int(gen.integers(2 ** 31 - 1)))
         # Resolve input (initial positions): check interventions, then state, then random initialization
         if 'T_initial' in interventions:
             positions = interventions['T_initial']
         elif 'T_initial' in input_state.values:
             positions = input_state['T_initial']
         else:
-            positions = np.random.uniform(0, self.L, (1, self.N))
+            positions = gen.uniform(0, self.L, (1, self.N))
 
         # Ensure batch dimension (batch, N)
         if positions.ndim == 1:
@@ -87,7 +96,7 @@ class BrownianParticleSystem(LowLevelModel):
         if current_n != self.N:
             new_pos = np.zeros((batch_size, self.N))
             for i in range(batch_size):
-                indices = np.random.choice(current_n, self.N, replace=True)
+                indices = gen.choice(current_n, self.N, replace=True)
                 new_pos[i] = positions[i, indices]
             positions = new_pos
 
@@ -122,7 +131,7 @@ class HeatEquationSolver:
             initial_profile: Initial heat profile, shape (batch, bins) or (bins,).
 
         Returns:
-            The evolved profile with the same shape as ``initial_profile``.
+            The evolved profile with the same shape as `initial_profile`.
         """
         u = np.array(initial_profile, dtype=float)
         was_1d = (u.ndim == 1)
@@ -144,6 +153,53 @@ class HeatEquationSolver:
 
 
 # Maps and sampler
+
+def _gaussian_bump_positions(n, box_len, rng):
+    """Draw n particle positions from a random truncated Gaussian bump inside [0, box_len].
+
+    The bump family (center in [0.3, 0.7] L, width in [0.05, 0.15] L) is the one used by
+    `SmoothProfileSampler`, so bottom-up and top-down interventions cover the same
+    initial conditions.
+    """
+    mu = rng.uniform(0.3, 0.7) * box_len
+    sigma = rng.uniform(0.05, 0.15) * box_len
+    out = np.empty(0)
+    while out.size < n:
+        draw = rng.normal(mu, sigma, size=2 * n)
+        out = np.concatenate([out, draw[(draw >= 0) & (draw <= box_len)]])
+    return out[:n]
+
+
+class ParticleCloudSubspace(Subspace):
+    """Micro-domain of the initial condition: n particle positions inside the box.
+
+    Sampling draws a whole particle cloud from a random smooth density (see
+    `_gaussian_bump_positions`), so a bottom-up sample is a physically valid
+    micro-state whose histogram is a smooth profile of unit mass.
+    """
+
+    def __init__(self, n_particles, box_len):
+        super().__init__(n_particles)
+        self.box_len = box_len
+
+    def contains(self, x):
+        x, was_unbatched = self._ensure_batched(x)
+        inside = np.all((x >= 0) & (x <= self.box_len), axis=1)
+        return inside[0] if was_unbatched else inside
+
+    def sample(self, shape, rng=None):
+        rng = self._get_rng(rng)
+        return np.stack([_gaussian_bump_positions(self.dim, self.box_len, rng)
+                         for _ in range(shape[0])])
+
+    def volume(self):
+        return float(self.box_len)
+
+    def loss(self, x):
+        x, was_unbatched = self._ensure_batched(x)
+        out = np.sum(np.maximum(0, -x) + np.maximum(0, x - self.box_len), axis=1)
+        return out[0] if was_unbatched else out
+
 
 class BinningValueMap(ContinuousValueMap):
     """Value map tau: abstract() bins particle positions into a histogram; ground() resamples positions."""
@@ -182,7 +238,7 @@ class BinningValueMap(ContinuousValueMap):
         bin_indices = rng.choice(self.n_bins, size=self.N, p=pdf)  # Sample bin indices based on PDF
 
         # Uniformly distribute within bins (use the passed seeded rng for
-        # cross-process reproducibility, not the global NumPy RNG).
+        # cross-process reproducibility, not the global NumPy RNG)
         bin_width = self.L / self.n_bins
         offsets = rng.random(self.N) * bin_width
         positions = self.edges[bin_indices] + offsets
@@ -217,7 +273,7 @@ class SmoothProfileSampler(InterventionSampler):
                 profile_pdf = amp * np.exp(-0.5 * ((self.x_grid - mu) / sigma)**2)
 
                 # Ground to micro-state, then abstract back to get the "canonical" macro-state for the high-level model
-                micro = self.value_map.ground('T_initial', profile_pdf)
+                micro = self.value_map.ground('T_initial', profile_pdf, rng=rng)
                 high_level_model_input = self.value_map.abstract('T_initial', micro)
 
                 batch_labels.append(high_level_model_input)

@@ -1,42 +1,37 @@
 """
-Example 9: Segment polarity gene regulatory network
-We evaluate whether a high-level description of the Wg->Fz paracrine signaling
-pathway is a valid causal abstraction of the 6-cell segment polarity network
-(Sánchez, Chaouiya & Thieffry, 2008).
+Example 9: Segment polarity gene regulatory network.
+
+Is the textbook Wingless/Hedgehog/Engrailed maintenance loop a valid abstraction of
+the multi-cellular logical model of Sanchez, Chaouiya & Thieffry (2008)?
 
 Low-level model:
-- A linear array of 6 identical "cells" (cells 1 and 6 are boundaries), each with
-  12 internal variables (0-1 or 0-2).
-- Variables update according to logical rules (multi-valued Boolean network).
-- Cells are coupled: Wg (wingless) protein from cell i activates Fz (frizzled)
-  in neighboring cells i±1 (paracrine signaling, requires level 2).
-- For the evaluation, we apply one synchronous update step.
-- Micro-variables: wg_c2 (Wg level in cell 2, input); fz_c1, fz_c3, fz_c4,
-  fz_c5 (Fz in various cells, outputs). All other variables start at 0.
+- The GINsim model `regulatoryGraph.ginml` (same as SP_6cells.zginml): 6 cells x 12
+  multi-valued components (Wg, Fz, Dsh, Slp, Nkd, En, Hh, Ci, Ciact, Cirep, Pka, Ptc).
+- The pair-rule input (Wg and En per cell) is held for `HOLD_STEPS` synchronous steps,
+  then released, and the network runs to its attractor. A knockout clamps a gene to 0
+  in every cell.
+- Micro-variables: 12 pair-rule inputs, 5 knockout switches, 72 network nodes.
+- Logical semantics: a node's basevalue is the parameter of the empty set of active
+  interactions; other unlisted sets have parameter 0 (GINsim's default).
 
 High-level model:
-- A simple causal rule representing the signaling chain.
-- Abstract input: wg_src ∈ {0=low, 1=high} - is Wg at the paracrine level?
-- Abstract output: fz_nbr ∈ {0=off, 1=on} - do the target cells express Fz?
-- Rule: wg_src=1 -> fz_nbr=1; wg_src=0 -> fz_nbr=0.
+- Per cell, steady-state Wg (W_i) and En (E_i) as a function of prepattern and genotype
+  (`reduced_steady_state`): En is kept by Wg signaling from the same or a neighboring
+  cell, Wg is kept by Hh from a neighboring En cell and repressed by En. It matches the
+  full network on all 1024 inputs (see `main`).
 
-Coarse-graining:
-- Maps the low-level specific cell variables to high-level abstract variables.
-- A valid spatial abstraction must capture the adjacency structure: setting Wg=2
-  in cell 2 causes Fz=1 in its true neighbors (cells 1 and 3), but not in
-  non-adjacent cells (4 and 5).
+Abstraction map:
+- Prepattern -> the 12 pair-rule inputs; KO_<gene> -> its knockout switch;
+  W_i -> Wg_i >= 1; E_i -> En_i = 1. All other nodes are internal.
 
-Value map:
-- Discrete Wg-level / Fz-on labels mapped via RectSubspace.
-- wg_src labels: 0 = Wg below paracrine threshold (< 2); 1 = high (= 2).
-- fz_tgt labels: 0 = all target cells off; 1 = any target cell on (abstract() uses OR).
+Macro domain:
+- 32 prepatterns (a Wg stripe next to an En stripe, 1-2 cells each) x any combination
+  of wg-, en-, hh-, ci-, dsh- knockouts. ptc- is left out: the full network then
+  oscillates with ectopic En, which the reduced model doesn't capture.
 
-Additional details:
-- We test four conditions to verify the library detects mis-specifications:
-  - Valid: CG map links wg_c2 to fz in cells 1,3 (true neighbors) + correct high-level model.
-  - Wrong map: CG map links wg_c2 to fz in cells 4,5 (non-neighbors) + correct high-level model.
-  - Reversed: Valid CG map, but high-level model rule is reversed (Wg=high -> Fz=off).
-  - Noise: Valid CG map + valid high-level model, but Gaussian noise on Fz output.
+Conditions (see test/09_grn.py):
+- valid, wrong_map (cell i read from cell 7 - i), wrong_high_level_model
+  (cell-autonomous, no signaling), noise.
 """
 
 import os
@@ -50,12 +45,9 @@ import numpy as np
 from causal_abstraction import (
     CausalGraph, LowLevelModel, SystemState,
     MicroVariableSchema, CoarseGrainingMap, ValueMap,
-    EvaluationEngine, EvaluationConfig, TopDownSampler,
-    Variable, RectSubspace, NoisyLowLevelModel,
-    MSEMetric, L2Metric, R2Metric, IIAMetric,
-    MacroscopicInvarianceMetric, ComplexityShiftMetric,
+    Variable, RectSubspace,
 )
-from causal_abstraction.tasks import StandardTasks
+from causal_abstraction.primitives import UNMAPPED
 
 
 # GINsim XML parser
@@ -145,7 +137,9 @@ class SegmentPolarityModel:
     2. Determine which edges are active (source value in [minvalue, maxvalue])
     3. Find the parameter whose set of active edges exactly matches
     4. If found, the variable's next value = that parameter's value
-    5. If no parameter matches, next value = basevalue
+    5. If no parameter matches: next value = basevalue when no incoming interaction is
+       active (basevalue is the logical parameter K(empty set)), and 0 otherwise (GINsim's
+       default for every logical parameter not listed in the file)
 
     This is the standard GINsim multi-valued logical semantics.
     """
@@ -200,8 +194,8 @@ class SegmentPolarityModel:
             if param_active_set == active_edges:
                 return param_val
 
-        # No parameter matched -> use base value
-        return node.basevalue
+        # No match: basevalue for the empty set of active interactions, else 0 (GINsim)
+        return node.basevalue if not active_edges else 0
 
     def synchronous_step(self, state: np.ndarray) -> np.ndarray:
         """Compute one synchronous update step (all variables update simultaneously)."""
@@ -211,247 +205,322 @@ class SegmentPolarityModel:
 
         return new_state
 
-# low-level model: one-step segment polarity dynamics
+# Experimental protocol and macro domain
+
+N_CELLS = 6
+HOLD_STEPS = 10      # pair-rule input held for this many synchronous steps, then released
+MAX_STEPS = 200      # cap on the release phase (fixed points are reached in < 20 steps)
+KO_GENES = ("Wg", "En", "Hh", "Ci", "Dsh")
+
+
+def stripe_prepatterns() -> List[Tuple[int, ...]]:
+    """Pair-rule prepatterns: one contiguous Wg stripe abutting one contiguous En stripe.
+
+    Per cell: 0 = neither, 1 = Wg, 2 = En. Stripes are 1 or 2 cells wide, in either order
+    (Wg anterior or posterior to En), anywhere in the 6-cell row: 32 patterns. The wild
+    type of Sanchez et al. (2008) (Wg in cells 2-3, En in cells 4-5) is one of them.
+    """
+    out = set()
+    for w in (1, 2):
+        for e in (1, 2):
+            for start in range(0, N_CELLS - (w + e) + 1):
+                for block in ([1] * w + [2] * e, [2] * e + [1] * w):
+                    lab = [0] * N_CELLS
+                    for k, v in enumerate(block):
+                        lab[start + k] = v
+                    out.add(tuple(lab))
+    return sorted(out)
+
+
+PREPATTERNS = stripe_prepatterns()
+
 
 class SegmentPolarityLowLevelModel(LowLevelModel):
     """
-    One-step synchronous dynamics of the segment polarity network.
+    The full 72-node segment polarity network (6 cells x 12 components) under the
+    pair-rule protocol of Sanchez et al. (2008).
+
+    The pair-rule input (Wg and En levels per cell) is held for `HOLD_STEPS`
+    synchronous steps and then released; the network then runs to its attractor. Gene
+    knockouts clamp that gene to 0 in every cell throughout (GINsim mutant semantics).
 
     Micro-variables:
-    Input  : wg_c2  - Wg level in cell 2 (shape (1,), range 0-2).
-    Outputs: fz_c1, fz_c3, fz_c4, fz_c5 - Fz in cells 1, 3, 4, 5 (shape (1,) each).
-    All variables except wg_c2 start at 0 for each evaluation sample.
+      Inputs : `pp_Wg{i}` (0-2) and `pp_En{i}` (0-1), the pair-rule input of cell i;
+               `ko_{gene}` (0/1) for gene in `KO_GENES`.
+      Outputs: every network node (`Wg1` ... `Ptc6`) at the attractor. Fixed points
+               are reached on the whole macro domain; if a cycle is reached instead, the
+               output is the mean over the cycle.
     """
+
+    INPUTS = ([f"pp_Wg{i}" for i in range(1, N_CELLS + 1)]
+              + [f"pp_En{i}" for i in range(1, N_CELLS + 1)]
+              + [f"ko_{g}" for g in KO_GENES])
 
     def __init__(self, model: SegmentPolarityModel):
         self.model = model
+        self._cache: Dict[Tuple[int, ...], np.ndarray] = {}
 
-    def forward_with_interventions(self,
-                                   input_state: SystemState,
-                                   interventions: dict) -> SystemState:
-        # Retrieve wg_c2 - shape (batch, 1) or (1,)
-        raw = interventions.get('wg_c2', input_state.get('wg_c2', np.zeros((1, 1))))
-        wg_c2 = np.asarray(raw, dtype=float)
-        batch_size = wg_c2.shape[0]
+    def attractor_mean(self, pp_wg, pp_en, kos) -> np.ndarray:
+        """Mean node values over the attractor reached by the protocol (cached)."""
+        key = tuple(pp_wg) + tuple(pp_en) + tuple(kos)
+        if key in self._cache:
+            return self._cache[key]
+        idx = self.model.var_to_idx
+        clamps = [idx[f"{g}{i}"] for g, ko in zip(KO_GENES, kos) if ko
+                  for i in range(1, N_CELLS + 1)]
+        hold = ([(idx[f"Wg{i + 1}"], pp_wg[i]) for i in range(N_CELLS)]
+                + [(idx[f"En{i + 1}"], pp_en[i]) for i in range(N_CELLS)])
 
-        results = {k: [] for k in ('wg_c2', 'fz_c1', 'fz_c3', 'fz_c4', 'fz_c5')}
+        def clamp(s):
+            s[clamps] = 0
+            return s
 
-        for b in range(batch_size):
-            wg_val = int(round(float(wg_c2[b, 0])))
-            wg_val = max(0, min(2, wg_val))   # clamp to valid range
+        state = clamp(np.zeros(self.model.n_vars, dtype=np.int32))
+        for _ in range(HOLD_STEPS):
+            for j, v in hold:
+                state[j] = v
+            state = clamp(self.model.synchronous_step(clamp(state)))
+        seen, traj = {}, []
+        for k in range(MAX_STEPS):
+            b = state.tobytes()
+            if b in seen:
+                break
+            seen[b] = k
+            traj.append(state)
+            state = clamp(self.model.synchronous_step(state))
+        cycle = traj[seen[state.tobytes()]:] if state.tobytes() in seen else traj[-1:]
+        out = np.mean(np.stack(cycle), axis=0)
+        self._cache[key] = out
+        return out
 
-            # Build all-zero initial state, then set Wg2
-            init_dict = {nid: 0 for nid in self.model.node_order}
-            init_dict['Wg2'] = wg_val
+    def forward_with_interventions(self, input_state: SystemState, interventions: dict) -> SystemState:
+        def col(name, default):
+            raw = interventions.get(name, input_state.get(name))
+            if raw is None:
+                return None, default
+            return np.asarray(raw, dtype=float).reshape(-1), default
 
-            state = self.model.state_to_array(init_dict)
-            next_state = self.model.synchronous_step(state)
+        cols = {name: col(name, 0.0) for name in self.INPUTS}
+        batch = max([len(c[0]) for c in cols.values() if c[0] is not None] or [1])
 
-            def _get(node): return float(next_state[self.model.var_to_idx[node]])
+        def value(name, b, hi):
+            arr, default = cols[name]
+            v = default if arr is None else arr[min(b, len(arr) - 1)]
+            return int(min(max(round(float(v)), 0), hi))
 
-            results['wg_c2'].append([float(wg_val)])
-            results['fz_c1'].append([_get('Fz1')])
-            results['fz_c3'].append([_get('Fz3')])
-            results['fz_c4'].append([_get('Fz4')])
-            results['fz_c5'].append([_get('Fz5')])
-
-        out = {k: np.array(v, dtype=float) for k, v in results.items()}
-        return input_state.merge(SystemState(values=out))
-
-
-# Value map: discrete Wg-level / Fz-on labels
-# Wg source: 0 = Wg below paracrine threshold (< 2); 1 = high (= 2)
-_WG_SPECS = {
-    0: RectSubspace((-0.1, 1.9)),   # Wg in [0, 1]
-    1: RectSubspace((1.9, 2.1)),    # Wg = 2 (paracrine-active)
-}
-
-# Fz target pair grounding representatives: 0 = all off; 1 = all on
-# (abstract() labels a mixed micro-state via OR; these rects are the canonical
-#  representatives used for grounding / surjectivity, not the abstraction rule.)
-_FZ_PAIR_SPECS = {
-    0: RectSubspace((-0.1, 0.1), (-0.1, 0.1)),
-    1: RectSubspace((0.9, 1.1), (0.9, 1.1)),
-}
+        outputs = {name: [] for name in self.model.node_order}
+        inputs = {name: [] for name in self.INPUTS}
+        for b in range(batch):
+            pp_wg = [value(f"pp_Wg{i}", b, 2) for i in range(1, N_CELLS + 1)]
+            pp_en = [value(f"pp_En{i}", b, 1) for i in range(1, N_CELLS + 1)]
+            kos = [value(f"ko_{g}", b, 1) for g in KO_GENES]
+            final = self.attractor_mean(pp_wg, pp_en, kos)
+            for j, name in enumerate(self.model.node_order):
+                outputs[name].append([float(final[j])])
+            for name, v in zip(self.INPUTS, pp_wg + pp_en + kos):
+                inputs[name].append([float(v)])
+        values = {k: np.array(v) for k, v in {**inputs, **outputs}.items()}
+        return input_state.merge(SystemState(values=values))
 
 
-class WgFzValueMap(ValueMap):
+# Value map
+
+class SegmentPolarityValueMap(ValueMap):
     """
-    ValueMap for the Wg-source / Fz-target causal test.
+    tau for the pathway-level abstraction.
 
-    wg_src labels  : 0 = low Wg (< 2),  1 = high Wg (= 2, paracrine active).
-    fz_tgt labels  : 0 = all target cells off,  1 = any target cell on (OR).
+    `Prepattern`  <-> the 12 pair-rule inputs (pp_Wg1..6 at level 0/2, pp_En1..6 at 0/1);
+                        label k is `PREPATTERNS[k]`.
+    `KO_{gene}`   <-> `ko_{Gene}` (0/1).
+    `W{i}`        <-> Wg in cell i: 1 if expressed (level >= 1), else 0.
+    `E{i}`        <-> En in cell i: 1 if expressed, else 0.
+
+    Read-outs use the logical thresholds (0.5), so measurement noise maps to the nearest
+    level; a micro input outside every prepattern abstracts to UNMAPPED.
+
+    Args:
+        cell_order: Micro cell feeding macro cell i (`cell_order[i-1]`); the identity
+            for the valid map, reversed for the mirrored (wrong) map.
     """
 
-    def __init__(self, cg_map: CoarseGrainingMap):
-        super().__init__(cg_map, {
-            'wg_src': _WG_SPECS,
-            'fz_tgt': _FZ_PAIR_SPECS,
-        })
+    def __init__(self, cg_map: CoarseGrainingMap, cell_order=tuple(range(1, N_CELLS + 1))):
+        tol = 0.4
+        specs = {"Prepattern": {
+            k: RectSubspace(*([(2.0 * (c == 1) - tol, 2.0 * (c == 1) + tol) for c in pat]
+                              + [(1.0 * (c == 2) - tol, 1.0 * (c == 2) + tol) for c in pat]))
+            for k, pat in enumerate(PREPATTERNS)}}
+        bit = {0: RectSubspace((-tol, tol)), 1: RectSubspace((1 - tol, 1 + tol))}
+        for g in KO_GENES:
+            specs[f"KO_{g.lower()}"] = bit
+        for i in range(1, N_CELLS + 1):
+            specs[f"W{i}"] = {0: RectSubspace((-tol, tol)), 1: RectSubspace((2 - tol, 2 + tol))}
+            specs[f"E{i}"] = bit
+        super().__init__(cg_map, specs)
+        self._index = {pat: k for k, pat in enumerate(PREPATTERNS)}
 
     def abstract(self, name: str, val: np.ndarray):
-        val = np.asarray(val, dtype=float).flatten()
-        if name == 'wg_src':
-            return int(val[0] >= 1.9)       # 1 if Wg = 2, else 0
-        else: # fz_tgt
-            return int(np.any(val > 0.5))   # 1 if any target cell has Fz = 1
-
-    def ground(self, name: str, label, rng=None):
-        rng = rng if rng is not None else np.random.default_rng()
-        if name == 'wg_src':
-            return np.array([0.0] if int(label) == 0 else [2.0], dtype=float)
-        else: # fz_tgt
-            if int(label) == 0:
-                return np.zeros(2, dtype=float)
-            return np.ones(2, dtype=float)
+        val = np.asarray(val, dtype=float).ravel()
+        if name == "Prepattern":
+            wg, en = val[:N_CELLS], val[N_CELLS:]
+            pat = tuple(1 if w > 1.0 else (2 if e > 0.5 else 0) for w, e in zip(wg, en))
+            if any(w > 1.0 and e > 0.5 for w, e in zip(wg, en)):
+                return UNMAPPED
+            return self._index.get(pat, UNMAPPED)
+        return int(val[0] > 0.5)
 
 
 # Schema and CG-map builders
+
 def _base_schema() -> MicroVariableSchema:
-    """Schema with wg_c2 (input) and Fz in cells 1, 3, 4, 5 (outputs)."""
-    return MicroVariableSchema([
-        Variable('wg_c2', shape=(1,)),
-        Variable('fz_c1', shape=(1,)),
-        Variable('fz_c3', shape=(1,)),
-        Variable('fz_c4', shape=(1,)),
-        Variable('fz_c5', shape=(1,)),
-    ])
+    """Pair-rule inputs, knockout switches and the 72 network nodes."""
+    names = SegmentPolarityLowLevelModel.INPUTS + [
+        f"{g}{i}" for i in range(1, N_CELLS + 1)
+        for g in ("Wg", "Fz", "Dsh", "Slp", "Nkd", "En", "Hh", "Ci", "Ciact", "Cirep", "Pka", "Ptc")]
+    return MicroVariableSchema([Variable(n, shape=(1,)) for n in names])
+
+
+def _build_cg_vm(schema: MicroVariableSchema, cell_order):
+    mapping = {"Prepattern": [f"pp_Wg{i}" for i in range(1, N_CELLS + 1)]
+                             + [f"pp_En{i}" for i in range(1, N_CELLS + 1)]}
+    for g in KO_GENES:
+        mapping[f"KO_{g.lower()}"] = [f"ko_{g}"]
+    for i, c in enumerate(cell_order, start=1):
+        mapping[f"W{i}"] = [f"Wg{c}"]
+        mapping[f"E{i}"] = [f"En{c}"]
+    used = {m for sels in mapping.values() for m in sels}
+    # All other network nodes are internal (not Phi)
+    internal = sorted(schema.variable_names - used)
+    cg = CoarseGrainingMap(schema, mapping, internal_variables=internal)
+    return cg, SegmentPolarityValueMap(cg, cell_order)
 
 
 def build_valid_cg_vm(schema: MicroVariableSchema):
-    """
-    Valid CG map: wg_c2 -> wg_src, {fz_c1, fz_c3} -> fz_tgt.
-    Cells 1 and 3 are the true neighbors of cell 2 in the linear array.
-    """
-    cg = CoarseGrainingMap(schema, {
-        'wg_src': ['wg_c2'],
-        'fz_tgt': ['fz_c1', 'fz_c3'],
-    })
-    vm = WgFzValueMap(cg)
-    return cg, vm
+    """Valid map: macro cell i is micro cell i."""
+    return _build_cg_vm(schema, tuple(range(1, N_CELLS + 1)))
 
 
 def build_wrong_cg_vm(schema: MicroVariableSchema):
-    """
-    Wrong CG map: wg_c2 -> wg_src, {fz_c4, fz_c5} -> fz_tgt.
-    Cells 4 and 5 are not neighbors of cell 2 - Wg2 has no effect on them.
-    This tests whether the library detects the mis-attribution of causal influence.
-    """
-    cg = CoarseGrainingMap(schema, {
-        'wg_src': ['wg_c2'],
-        'fz_tgt': ['fz_c4', 'fz_c5'],
-    })
-    vm = WgFzValueMap(cg)
-    return cg, vm
+    """Wrong map: macro cell i read from micro cell 7 - i (anterior/posterior mirrored)."""
+    return _build_cg_vm(schema, tuple(range(N_CELLS, 0, -1)))
 
 
-# high-level model builders
-def _base_high_level_model_inputs() -> CausalGraph:
-    high_level_model = CausalGraph()
-    high_level_model.add_variable('wg_src', lambda: None, distribution={0: 0.5, 1: 0.5})
-    return high_level_model
+# High-level models
+
+def reduced_steady_state(prepattern, kos):
+    """Steady state of the pathway-level model of the Wg/Hh/En loop.
+
+    Obtained from the 72-node network by eliminating the signaling intermediates at
+    their quasi-steady values (a stable-state-preserving reduction in the sense of
+    Naldi et al., 2011). Per cell i, with W = Wg expressed and E = En expressed:
+
+        S_i = W_{i-1} or W_i or W_{i+1}       (Wg pathway active: Fz/Dsh; Wg is autocrine
+                                               at any level and paracrine at level 2)
+        H_i = E_{i-1} or E_{i+1}              (Hh from a neighboring En/Hh cell
+                                               inactivates Ptc)
+        E_i' = S_i and E_i                    (En is maintained by Wg signaling)
+        W_i' = S_i and not E_i and H_i        (Wg is maintained by Hh signaling, via Slp
+                                               and Ci; repressed by En)
+
+    Knockouts: wg- -> W = 0, en- -> E = 0, hh- -> H = 0, ci- -> W = 0 (no Ci activator),
+    dsh- -> S = 0. Same protocol as the low level: the prepattern is held for
+    `HOLD_STEPS` synchronous steps, then released. Returns (W, E) per cell.
+    """
+    n = N_CELLS
+    ko = dict(zip(KO_GENES, kos))
+
+    def step(W, E):
+        S = [int(not ko["Dsh"] and (W[i] or (i > 0 and W[i - 1]) or (i < n - 1 and W[i + 1])))
+             for i in range(n)]
+        H = [int(not ko["Hh"] and ((i > 0 and E[i - 1]) or (i < n - 1 and E[i + 1])))
+             for i in range(n)]
+        En = [int(not ko["En"] and S[i] and E[i]) for i in range(n)]
+        Wn = [int(not (ko["Wg"] or ko["Ci"]) and S[i] and not E[i] and H[i]) for i in range(n)]
+        return Wn, En
+
+    W0 = [int(c == 1 and not ko["Wg"]) for c in prepattern]
+    E0 = [int(c == 2 and not ko["En"]) for c in prepattern]
+    W, E = W0, E0
+    for _ in range(HOLD_STEPS):
+        W, E = step(W0, E0)
+    seen = set()
+    while (tuple(W), tuple(E)) not in seen:
+        seen.add((tuple(W), tuple(E)))
+        W, E = step(W, E)
+    return W, E
+
+
+def cell_autonomous_steady_state(prepattern, kos):
+    """Wrong model: no intercellular signaling, each cell keeps its pair-rule identity
+    (only the knockout of the gene itself removes it)."""
+    ko = dict(zip(KO_GENES, kos))
+    W = [int(c == 1 and not ko["Wg"]) for c in prepattern]
+    E = [int(c == 2 and not ko["En"]) for c in prepattern]
+    return W, E
+
+
+def _build_high_level_model(steady_fn) -> CausalGraph:
+    hlm = CausalGraph()
+    hlm.add_variable("Prepattern", lambda: None,
+                     distribution={k: 1 / len(PREPATTERNS) for k in range(len(PREPATTERNS))})
+    ko_names = [f"KO_{g.lower()}" for g in KO_GENES]
+    for name in ko_names:
+        hlm.add_variable(name, lambda: None, distribution={0: 0.8, 1: 0.2})
+    roots = ["Prepattern"] + ko_names
+    cache = {}
+
+    def steady(**kw):
+        key = (int(kw["Prepattern"]),) + tuple(int(kw[k]) for k in ko_names)
+        if key not in cache:
+            cache[key] = steady_fn(PREPATTERNS[key[0]], key[1:])
+        return cache[key]
+
+    for i in range(N_CELLS):
+        hlm.add_variable(f"W{i + 1}", lambda i=i, **kw: steady(**kw)[0][i], parents=roots,
+                         distribution={0: 0.5, 1: 0.5})
+        hlm.add_variable(f"E{i + 1}", lambda i=i, **kw: steady(**kw)[1][i], parents=roots,
+                         distribution={0: 0.5, 1: 0.5})
+    return hlm
 
 
 def build_valid_high_level_model() -> CausalGraph:
-    """
-    Correct high-level model: wg_src = 1 (high Wg) -> fz_tgt = 1 (Fz on in true neighbors).
-    """
-    high_level_model = _base_high_level_model_inputs()
-
-    def valid_rule(wg_src):
-        return int(wg_src)   # 0 -> 0,  1 -> 1
-
-    high_level_model.add_variable('fz_tgt', valid_rule, parents=['wg_src'],
-                     distribution={0: 0.5, 1: 0.5})
-    return high_level_model
+    """Pathway-level model of the Wg/Hh/En loop (`reduced_steady_state`)."""
+    return _build_high_level_model(reduced_steady_state)
 
 
-def build_reversed_high_level_model() -> CausalGraph:
-    """
-    Wrong high-level model: reverses the prediction - high Wg -> Fz off, low Wg -> Fz on.
-    Uses the valid CG map, so the mis-specification is in the causal rule.
-    """
-    high_level_model = _base_high_level_model_inputs()
-
-    def reversed_rule(wg_src):
-        return 1 - int(wg_src)   # reversed
-
-    high_level_model.add_variable('fz_tgt', reversed_rule, parents=['wg_src'],
-                     distribution={0: 0.5, 1: 0.5})
-    return high_level_model
+def build_cell_autonomous_high_level_model() -> CausalGraph:
+    """Wrong model: the pair-rule prepattern is simply maintained, cell by cell."""
+    return _build_high_level_model(cell_autonomous_steady_state)
 
 
-# Evaluation
+OUTPUT_VARS = [f"{x}{i}" for i in range(1, N_CELLS + 1) for x in ("W", "E")]
+ROOT_VARS = ["Prepattern"] + [f"KO_{g.lower()}" for g in KO_GENES]
+
+
 def main():
-    """
-    Evaluate all four conditions of the causal abstraction.
-    """
-
-    # Load model
-    print("\nLoading model from GINsim files...")
-    _grn_dir = os.path.dirname(os.path.abspath(__file__))
-    model = SegmentPolarityModel.from_ginml(os.path.join(_grn_dir, 'regulatoryGraph.ginml'))
-
-    print("\nEvaluating abstraction (Wg->Fz paracrine signaling) across 4 conditions...")
-
-    n_samples = 500
-
-    schema = _base_schema()
-    low_level_model = SegmentPolarityLowLevelModel(model)
-    noisy_low_level_model = NoisyLowLevelModel(low_level_model, noise_std=0.4, noise_type='gaussian')
-
-    cg_valid, vm_valid = build_valid_cg_vm(schema)
-    cg_wrong, vm_wrong = build_wrong_cg_vm(schema)
-
-    high_level_model_valid = build_valid_high_level_model()
-    high_level_model_rev = build_reversed_high_level_model()
-
-    cfg = EvaluationConfig(metric='mse', seed=0)
-    out_vars = ['fz_tgt']
-    interv_vars = ['wg_src']
-
-    conditions = [
-        ('Valid (adjacent CG map + correct high-level model)',    high_level_model_valid, low_level_model,       cg_valid, vm_valid),
-        ('Wrong map (non-adjacent CG map)',          high_level_model_valid, low_level_model,       cg_wrong, vm_wrong),
-        ('Reversed high-level model (correct map, wrong rule)',   high_level_model_rev,   low_level_model,       cg_valid, vm_valid),
-        ('Noise (σ=0.4 on Fz output)',               high_level_model_valid, noisy_low_level_model, cg_valid, vm_valid),
-    ]
-
-    for title, high_level_model, cur_low_level_model, cg, vm in conditions:
-        print(f"\n{'=' * 62}")
-        print(f"  {title}")
-        print(f"{'=' * 62}")
-
-        eng = EvaluationEngine(high_level_model, cur_low_level_model, vm, cg, cfg)
-        builder = eng.builder
-        sampler = TopDownSampler(vm)
-
-        tasks = [
-            StandardTasks.score(builder, sampler=sampler, name='CAE_down'),
-            StandardTasks.observational(builder, L2Metric(), sampler=sampler, output_vars=out_vars, name='L2'),
-            StandardTasks.observational(builder, MSEMetric(), sampler=sampler, output_vars=out_vars, name='MSE'),
-            StandardTasks.observational(builder, R2Metric(), sampler=sampler, output_vars=out_vars, name='R²'),
-        ]
-
-        results = eng.run_tasks(
-            tasks, n_samples=n_samples, batch_size=1, max_interventions=1, intervention_domain=interv_vars,
-        )
-        print(results)
-
-        analytical = eng.run_analytical_metrics(
-            [
-                IIAMetric(inner_metric='mse', output_vars=out_vars, n_pairs=10),
-                MacroscopicInvarianceMetric(n_pairs=5, inner_metric='mse'),
-                ComplexityShiftMetric(),
-            ],
-            sampler=sampler,
-            n_samples=min(n_samples, 30),
-        )
-        print('\nAnalytical metrics:')
-        for an_name, res in analytical.items():
-            summary = {k: f'{v:.4f}' if isinstance(v, float) else str(v)
-                       for k, v in res.items() if not isinstance(v, list)}
-            print(f'  {an_name}: {summary}')
+    """Print the wild-type and mutant stable patterns of the full network and of the
+    pathway-level model, and check that they agree on the whole macro domain."""
+    import itertools
+    grn_dir = os.path.dirname(os.path.abspath(__file__))
+    model = SegmentPolarityModel.from_ginml(os.path.join(grn_dir, 'regulatoryGraph.ginml'))
+    llm = SegmentPolarityLowLevelModel(model)
+    idx = model.var_to_idx
+    wt = PREPATTERNS.index((0, 1, 1, 2, 2, 0))
+    for name, kos in [("WT", (0, 0, 0, 0, 0)), ("wg-", (1, 0, 0, 0, 0)), ("en-", (0, 1, 0, 0, 0)),
+                      ("hh-", (0, 0, 1, 0, 0)), ("ci-", (0, 0, 0, 1, 0)), ("dsh-", (0, 0, 0, 0, 1))]:
+        pat = PREPATTERNS[wt]
+        final = llm.attractor_mean([2 * (c == 1) for c in pat], [int(c == 2) for c in pat], kos)
+        cells = ' '.join(f"W{int(final[idx[f'Wg{i}']] > 0)}E{int(final[idx[f'En{i}']] > 0)}"
+                         for i in range(1, N_CELLS + 1))
+        print(f"{name:5s} full network: {cells}   pathway model: {reduced_steady_state(pat, kos)}")
+    agree = total = 0
+    for k, kos in itertools.product(range(len(PREPATTERNS)), itertools.product((0, 1), repeat=5)):
+        pat = PREPATTERNS[k]
+        final = llm.attractor_mean([2 * (c == 1) for c in pat], [int(c == 2) for c in pat], kos)
+        W = [int(final[idx[f'Wg{i}']] > 0) for i in range(1, N_CELLS + 1)]
+        E = [int(final[idx[f'En{i}']] > 0) for i in range(1, N_CELLS + 1)]
+        agree += (W, E) == tuple(map(list, reduced_steady_state(pat, kos)))
+        total += 1
+    print(f"pathway model == full network on {agree}/{total} (prepattern, genotype) cells")
 
 
 if __name__ == '__main__':

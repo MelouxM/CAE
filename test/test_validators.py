@@ -1,7 +1,7 @@
 """
 Characterization tests for the structural validators that guard malformed
-abstractions: ``CoarseGrainingMap``'s disjointness / topology
-checks (the ``a`` map) and ``ValueMap.validate_surjectivity`` (the ``tau_X``
+abstractions: `CoarseGrainingMap`'s disjointness / topology
+checks (the `a` map) and `ValueMap.validate_surjectivity` (the `tau_X`
 maps).
 
 These are characterization tests: each assertion pins the validator's
@@ -9,9 +9,9 @@ current behavior, never a "corrected" one (to avoid changing any metric or
 reported number). In particular two
 contracts are easy to misremember and are pinned deliberately:
 
-* ``CoarseGrainingMap`` raises (``ValueError`` / ``NotImplementedError``) at
+* `CoarseGrainingMap` raises (`ValueError` / `NotImplementedError`) at
   construction time on a malformed map; whereas
-* ``ValueMap.validate_surjectivity`` does not raise: it returns a ``bool``
+* `ValueMap.validate_surjectivity` does not raise: it returns a `bool`
   (and logs on mismatch).
 
 No metric, reported number, or system definition is exercised or changed.
@@ -42,9 +42,9 @@ def _schema(*variables):
 
 
 def _value_map(specs):
-    """Wrap label->subspace ``specs`` in a ValueMap over a trivial cg_map.
+    """Wrap label->subspace `specs` in a ValueMap over a trivial cg_map.
 
-    ``validate_surjectivity`` only consults ``self.specs``; the cg_map merely
+    `validate_surjectivity` only consults `self.specs`; the cg_map merely
     has to be constructible, so each abstract var is backed by a 1-dim micro var.
     """
     schema = _schema(*[Variable(name, shape=(1,)) for name in specs])
@@ -57,26 +57,26 @@ def _value_map(specs):
 # --------------------------------------------------------------------------- #
 
 def test_cg_overlapping_selectors_raise():
-    """Two abstract vars claiming overlapping micro dims -> ValueError."""
+    """With allow_overlap=False, two abstract vars claiming overlapping micro dims -> ValueError."""
     schema = _schema(Variable("x", shape=(4,)))
     with pytest.raises(ValueError, match="Overlap detected"):
         CoarseGrainingMap(schema, {
             "A": [("x", slice(0, 2))],
             "B": [("x", slice(1, 3))],  # shares index 1 with A
-        })
+        }, allow_overlap=False)
 
 
 def test_cg_adjacent_slices_are_disjoint():
     """Touching-but-not-overlapping slices [0:2) and [2:4) are allowed.
 
-    Pins the half-open boundary semantics: ``max(0,2) < min(2,4)`` is False.
+    Pins the half-open boundary semantics: `max(0,2) < min(2,4)` is False.
     """
     schema = _schema(Variable("x", shape=(4,)))
     cg = CoarseGrainingMap(schema, {
         "A": [("x", slice(0, 2))],
         "B": [("x", slice(2, 4))],
     })
-    # Fully covered across the two abstract vars -> x is not a phi variable.
+    # Fully covered across the two abstract vars -> x is not a phi variable
     assert cg.phi_variables == set()
 
 
@@ -131,8 +131,8 @@ def test_cg_internal_variables_excluded_from_phi():
 def test_cg_partial_mapping_warns_and_adds_unmapped_dims_to_phi(caplog):
     """A partially-mapped variable warns and its UNMAPPED dimensions join phi.
 
-    Pins the behaviour that the unmapped dimensions of a partially-mapped
-    variable are genuinely treated as Phi (one per-dimension ``MicroSelector``
+    Pins the behavior that the unmapped dimensions of a partially-mapped
+    variable are genuinely treated as Phi (one per-dimension `MicroSelector`
     each), making the construction-time warning truthful. The mapped dimensions
     (0, 1) stay out of phi; only the unmapped tail (2, 3) is added.
     """
@@ -159,7 +159,7 @@ def test_validate_surjectivity_true_for_disjoint_labels():
 def test_validate_surjectivity_false_when_label_subspace_is_shadowed():
     """Label 1's region lies inside label 0's, so it abstracts to 0 -> False.
 
-    ``abstract`` returns the first containing subspace in insertion order, so a
+    `abstract` returns the first containing subspace in insertion order, so a
     sample drawn for label 1 is captured by label 0 and the check fails.
     """
     vm = _value_map({"A": {
@@ -178,9 +178,9 @@ def test_validate_surjectivity_false_when_sample_is_unmapped():
     """
     spec = {0: RectSubspace((0.0, 1.0))}
     vm = _value_map({"A": spec})
-    # Sanity: the lone label is self-consistent (surjective).
+    # Sanity: the lone label is self-consistent (surjective)
     assert vm.validate_surjectivity(rng=np.random.default_rng(0)) is True
-    # And a value outside every label's subspace is reported as UNMAPPED.
+    # And a value outside every label's subspace is reported as UNMAPPED
     assert vm.abstract("A", np.array([9.0])) is UNMAPPED
 
 

@@ -36,14 +36,16 @@ Value map:
 - We use RectSubspaces to sample valid intervention ranges for the independent variables.
 
 Additional notes:
-- The Van der Waals constants (a, b) are empirically determined via an isothermal sweep at the Boyle temperature
+- The Van der Waals constants (a, b) are fitted jointly on NVT sweeps over three supercritical
+  isotherms (T = 2, T_Boyle, 5; rho in [0.05, 0.40]). A single isotherm at the Boyle temperature
+  cannot identify them, since the second virial coefficient b - a/T vanishes there.
 - The system is simulated for over 10,000 steps per sample (minimization + 5,000x equilibration + 5,000x measurement).
 - We evaluate the laws in a local region around the starting values of T, V and P.
 """
 
 
+import json
 import os
-import pickle
 from typing import Optional
 
 import numpy as np
@@ -54,12 +56,6 @@ from causal_abstraction import (
     LowLevelModel, SystemState, TopDownSampler
 )
 
-# Anchor the calibration cache to this module's own directory so it always
-# resolves to the trusted, repo-local asset (systems/gas_law_calibration.pkl)
-# rather than a pickle picked up from an attacker-controlled current working
-# directory. pickle.load below executes arbitrary code during deserialization,
-# so the source of this file must be controlled.
-CALIB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gas_law_calibration.pkl")
 N_PARTICLES = 128
 DT = 0.002
 CUTOFF = 3.0
@@ -68,33 +64,160 @@ T_BOYLE = 3.417927982  # Boyle temperature for LJ fluid
 # Numba physics engine
 
 @numba.njit
-def compute_forces(pos, n, box, cutoff_sq):
-    """
-    Computes Lennard-Jones forces and virial stress.
-    Standard LJ potential: 4*eps*((sig/r)^12 - (sig/r)^6)
-    Reduced units: eps=1.0, sig=1.0.
-    """
+def seed_numba(seed):
+    """Seed the generator used inside Numba-compiled code (separate from NumPy's)."""
+    np.random.seed(seed)
+
+
+@numba.njit
+def _lj_pair(dr, r2):
+    """LJ force vector on i from j for separation dr = r_i - r_j (reduced units)."""
+    inv_r2 = 1.0 / r2
+    inv_r6 = inv_r2 ** 3
+    # F = 24 * epsilon * (2*inv_r12 - inv_r6) / r2 * r_vec
+    return 24.0 * inv_r2 * (2.0 * inv_r6 ** 2 - inv_r6) * dr
+
+
+@numba.njit
+def _compute_forces_all_pairs(pos, n, box, cutoff_sq):
     forces = np.zeros_like(pos)
     virial = 0.0
-
     for i in range(n):
         for j in range(i + 1, n):
             dr = pos[i] - pos[j]
             # Periodic boundary conditions (minimum image convention)
             dr = dr - box * np.round(dr / box)
             r2 = np.sum(dr ** 2)
-
             if r2 < cutoff_sq:
-                inv_r2 = 1.0 / r2
-                inv_r6 = inv_r2 ** 3
-                # LJ Force: F = 24 * epsilon * (2*inv_r12 - inv_r6) / r2 * r_vec
-                f_scalar = 24.0 * inv_r2 * (2.0 * inv_r6 ** 2 - inv_r6)
-                f_vec = f_scalar * dr
+                f_vec = _lj_pair(dr, r2)
                 forces[i] += f_vec
                 forces[j] -= f_vec
-
                 virial += np.dot(f_vec, dr)  # Virial for pressure calculation: sum(r . f)
     return forces, virial
+
+
+@numba.njit
+def _compute_forces_cells(pos, n, box, cutoff_sq, nc):
+    """Same as the all-pairs loop, restricted to the 27 neighboring cells (nc >= 3 per side)."""
+    forces = np.zeros_like(pos)
+    virial = 0.0
+    cs = box / nc
+    head = -np.ones(nc * nc * nc, dtype=np.int64)
+    nxt = -np.ones(n, dtype=np.int64)
+    cell_of = np.empty((n, 3), dtype=np.int64)
+    for i in range(n):
+        for d in range(3):
+            cell_of[i, d] = int(np.floor((pos[i, d] % box) / cs)) % nc
+        c = (cell_of[i, 0] * nc + cell_of[i, 1]) * nc + cell_of[i, 2]
+        nxt[i] = head[c]
+        head[c] = i
+    for i in range(n):
+        for ox in range(-1, 2):
+            for oy in range(-1, 2):
+                for oz in range(-1, 2):
+                    cx = (cell_of[i, 0] + ox) % nc
+                    cy = (cell_of[i, 1] + oy) % nc
+                    cz = (cell_of[i, 2] + oz) % nc
+                    j = head[(cx * nc + cy) * nc + cz]
+                    while j >= 0:
+                        if j > i:
+                            dr = pos[i] - pos[j]
+                            dr = dr - box * np.round(dr / box)
+                            r2 = np.sum(dr ** 2)
+                            if r2 < cutoff_sq:
+                                f_vec = _lj_pair(dr, r2)
+                                forces[i] += f_vec
+                                forces[j] -= f_vec
+                                virial += np.dot(f_vec, dr)
+                        j = nxt[j]
+    return forces, virial
+
+
+@numba.njit
+def compute_forces(pos, n, box, cutoff_sq):
+    """
+    Computes Lennard-Jones forces and virial stress.
+    Standard LJ potential: 4*eps*((sig/r)^12 - (sig/r)^6)
+    Reduced units: eps=1.0, sig=1.0.
+
+    Uses cell lists (O(N)) when the box holds at least 3 cells of the cutoff size per side,
+    and the all-pairs loop otherwise; both visit exactly the pairs within the cutoff.
+    """
+    nc = int(box / np.sqrt(cutoff_sq))
+    if nc >= 3:
+        return _compute_forces_cells(pos, n, box, cutoff_sq, nc)
+    return _compute_forces_all_pairs(pos, n, box, cutoff_sq)
+
+
+VERLET_SKIN = 0.4
+
+
+@numba.njit
+def _build_pairs(pos, n, box, rlist_sq):
+    """All pairs closer than the list radius (minimum image), as two index arrays."""
+    count = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            dr = pos[i] - pos[j]
+            dr = dr - box * np.round(dr / box)
+            if np.sum(dr ** 2) < rlist_sq:
+                count += 1
+    pi = np.empty(count, dtype=np.int64)
+    pj = np.empty(count, dtype=np.int64)
+    k = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            dr = pos[i] - pos[j]
+            dr = dr - box * np.round(dr / box)
+            if np.sum(dr ** 2) < rlist_sq:
+                pi[k] = i
+                pj[k] = j
+                k += 1
+    return pi, pj
+
+
+@numba.njit
+def forces_with_list(pos, n, box, cutoff_sq, pi, pj, pos_ref, box_ref):
+    """LJ forces and virial, using a Verlet neighbor list when cell lists cannot help.
+
+    With at least 4 cutoff cells per side this just calls `compute_forces`. Otherwise
+    the pairs within cutoff + skin are listed once and reused until a particle has
+    moved more than half the skin or the box has changed.
+
+    Returns:
+        (forces, virial, pi, pj, pos_ref, box_ref): the list state to pass back in.
+    """
+    if int(box / np.sqrt(cutoff_sq)) >= 4:
+        f, v = compute_forces(pos, n, box, cutoff_sq)
+        return f, v, pi, pj, pos_ref, box_ref
+    rebuild = box != box_ref
+    if not rebuild:
+        half_skin_sq = (0.5 * VERLET_SKIN) ** 2
+        for i in range(n):
+            dr = pos[i] - pos_ref[i]
+            dr = dr - box * np.round(dr / box)
+            if np.sum(dr ** 2) > half_skin_sq:
+                rebuild = True
+                break
+    if rebuild:
+        rlist = np.sqrt(cutoff_sq) + VERLET_SKIN
+        pi, pj = _build_pairs(pos, n, box, rlist * rlist)
+        pos_ref = pos.copy()
+        box_ref = box
+    forces = np.zeros_like(pos)
+    virial = 0.0
+    for k in range(pi.shape[0]):
+        i = pi[k]
+        j = pj[k]
+        dr = pos[i] - pos[j]
+        dr = dr - box * np.round(dr / box)
+        r2 = np.sum(dr ** 2)
+        if r2 < cutoff_sq:
+            f_vec = _lj_pair(dr, r2)
+            forces[i] += f_vec
+            forces[j] -= f_vec
+            virial += np.dot(f_vec, dr)
+    return forces, virial, pi, pj, pos_ref, box_ref
 
 
 @numba.njit
@@ -142,7 +265,12 @@ def minimize_energy(pos, n, box, max_steps=500, tol=1.0):
             if f_norm > max_f:
                 max_f = f_norm
 
-        pos += forces * dt_desc  # Move down gradient
+        # Cap the displacement at 0.05 sigma per iteration so that the huge forces of
+        # overlapping pairs cannot fling particles across the box
+        step_scale = dt_desc
+        if max_f * dt_desc > 0.05:
+            step_scale = 0.05 / max_f
+        pos += forces * step_scale  # Move down gradient
         pos = pos % box  # Wrap
 
         if max_f < tol:
@@ -159,7 +287,11 @@ def run_equilibration(pos, vel, n, box, dt, steps, mode, target_1, target_2):
     Mode 2 (PVT): target_1=P, output=T
     """
     cutoff_sq = CUTOFF ** 2
-    forces, _ = compute_forces(pos, n, box, cutoff_sq)
+    pi = np.empty(0, dtype=np.int64)
+    pj = np.empty(0, dtype=np.int64)
+    pos_ref = pos.copy()
+    box_ref = -1.0
+    forces, _, pi, pj, pos_ref, box_ref = forces_with_list(pos, n, box, cutoff_sq, pi, pj, pos_ref, box_ref)
 
     tau_p = 200 * dt
     gamma = 1.0  # Friction coefficient for Langevin
@@ -181,7 +313,8 @@ def run_equilibration(pos, vel, n, box, dt, steps, mode, target_1, target_2):
             curr_v = box ** 3
             curr_rho = n / curr_v
 
-            _, curr_vir = compute_forces(pos, n, box, cutoff_sq)
+            _, curr_vir, pi, pj, pos_ref, box_ref = forces_with_list(
+                pos, n, box, cutoff_sq, pi, pj, pos_ref, box_ref)
             curr_k_temp = np.sum(vel ** 2) / (3 * n)  # Kinetic temp; full 3N DOF (no COM removal; ~0.8% bias at N=128)
             curr_p = (curr_rho * curr_k_temp) + (curr_vir / (3.0 * curr_v)) + get_p_tail_corr(n, curr_v, CUTOFF)
 
@@ -193,7 +326,8 @@ def run_equilibration(pos, vel, n, box, dt, steps, mode, target_1, target_2):
         pos = pos % box
 
         # Velocity Verlet step 2
-        forces_new, virial = compute_forces(pos, n, box, cutoff_sq)
+        forces_new, virial, pi, pj, pos_ref, box_ref = forces_with_list(
+            pos, n, box, cutoff_sq, pi, pj, pos_ref, box_ref)
         vel += 0.5 * (forces + forces_new) * dt
         forces = forces_new
 
@@ -223,13 +357,14 @@ def run_measurement(pos, vel, n, box, dt, steps, temperature):
     vol = box ** 3
     gamma = 1.0
     p_accum, t_accum = 0.0, 0.0
-    forces, _ = compute_forces(pos, n, box, cutoff_sq)
+    nl = (np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64), pos.copy(), -1.0)
+    forces, _, *nl = forces_with_list(pos, n, box, cutoff_sq, *nl)
 
     for step in range(steps):
         pos += vel * dt + 0.5 * forces * dt ** 2  # Verlet step 1
         pos = pos % box
 
-        forces_new, virial_new = compute_forces(pos, n, box, cutoff_sq)
+        forces_new, virial_new, *nl = forces_with_list(pos, n, box, cutoff_sq, *nl)
         vel += 0.5 * (forces + forces_new) * dt  # Verlet step 2
         forces = forces_new
 
@@ -245,33 +380,33 @@ def run_measurement(pos, vel, n, box, dt, steps, temperature):
 
     return p_accum / steps, t_accum / steps, box ** 3, pos, vel
 
+def make_initial_positions(n, box, rng):
+    """Random subset of a jittered cubic lattice with k^3 >= n sites, filling the whole box."""
+    k = int(np.ceil(n ** (1 / 3.0)))
+    s = box / k
+    grid = np.arange(k) * s
+    x, y, z = np.meshgrid(grid, grid, grid)
+    sites = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T
+    pos = sites[rng.choice(len(sites), size=n, replace=False)].copy()
+    pos += (rng.random((n, 3)) - 0.5) * (s * 0.1)
+    return minimize_energy(pos % box, n, box)
+
+
 # Physics model
 
 class UniversalGasModel(LowLevelModel):
     """Low-level model M: an N-body Lennard-Jones molecular-dynamics simulation."""
 
-    def __init__(self, equil_steps=5000, measure_steps=5000):
-        self.N = N_PARTICLES
+    def __init__(self, equil_steps=5000, measure_steps=5000, n_particles=N_PARTICLES):
+        self.N = n_particles
         self.equil_steps = equil_steps
         self.measure_steps = measure_steps
-        # Internal state cache
-        self.pos = None
-        self.vel = None
-        self.box = 10.0
 
-    def _init_lattice(self, box):
-        if self.pos is None or self.pos.shape[0] != self.N:  # Reset if dimensions change drastically/uninitialized
-            k = int(np.ceil(self.N ** (1 / 3.0)))
-            s = box / k
-            grid = np.arange(k) * s
-            x, y, z = np.meshgrid(grid, grid, grid)
-            self.pos = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T[:self.N]
-            self.pos += (np.random.rand(self.N, 3) - 0.5) * (s * 0.1)
-            self.vel = np.random.randn(self.N, 3)
-            self.pos = minimize_energy(self.pos, self.N, box)  # Remove overlaps immediately
-        return self.pos, self.vel
+    def forward_with_interventions(self, input_state: SystemState, interventions: dict,
+                                   rng: Optional[np.random.Generator] = None) -> SystemState:
+        gen = rng if rng is not None else np.random.default_rng()
+        seed_numba(int(gen.integers(2 ** 31 - 1)))
 
-    def forward_with_interventions(self, input_state: SystemState, interventions: dict) -> SystemState:
         def resolve(key, i):
             # Check interventions
             if key in interventions:
@@ -326,11 +461,11 @@ class UniversalGasModel(LowLevelModel):
                 curr_box = float(box_data[i])
 
             if pos_data is not None and len(pos_data) > i:
-                curr_pos = pos_data[i].copy()
-                curr_vel = vel_data[i].copy()
+                curr_pos = np.array(pos_data[i], dtype=float)  # copy: never alias the caller's state
+                curr_vel = np.array(vel_data[i], dtype=float)
             else:
-                curr_pos, curr_vel = self._init_lattice(curr_box)
-                curr_pos = minimize_energy(curr_pos, self.N, curr_box)
+                curr_pos = make_initial_positions(self.N, curr_box, gen)
+                curr_vel = gen.normal(0.0, np.sqrt(temp_in), size=(self.N, 3))
 
             # Intervention logic & equilibration
             active_vars = set(interventions.keys())
@@ -364,6 +499,10 @@ class UniversalGasModel(LowLevelModel):
                     curr_pos *= target_box / curr_box
                     curr_box = target_box
                 target_1 = press_in # Target P
+
+            # Remove overlaps left by the starting configuration or by compressing the box
+            # to the target volume (no-op when the forces are already small)
+            curr_pos = minimize_energy(curr_pos % curr_box, self.N, curr_box)
 
             # Run physics
             new_pos, new_vel, fin_box, found_temp = run_equilibration(
@@ -399,9 +538,10 @@ class UniversalGasModel(LowLevelModel):
 class ThermodynamicSampler(TopDownSampler):
     """TopDownSampler (CAE_down) that generates lattice microstates, deferring equilibration to M."""
 
-    def __init__(self, value_map):
+    def __init__(self, value_map, n_particles=N_PARTICLES):
         super().__init__(value_map)
         self._root_vars_only  = None
+        self.n_particles = n_particles
 
     def sample_intervention(self, variables, batch_size=1, max_interventions=None, force_all=False,
                             rng: Optional[np.random.Generator] = None):
@@ -426,16 +566,8 @@ class ThermodynamicSampler(TopDownSampler):
                 v_target = base_spec["volume"]["labels"][i]
                 box = float(v_target) ** (1.0 / 3.0)
 
-            # Lattice init
-            k = int(np.ceil(N_PARTICLES ** (1 / 3.0)))
-            s = box / k
-            grid = np.arange(k) * s
-            x, y, z = np.meshgrid(grid, grid, grid)
-            pos = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T[:N_PARTICLES]
-            vel = rng.normal(size=(N_PARTICLES, 3))
-
-            # We do not minimize: the low-level model handles the physics validity.
-            # This just provides raw data structures.
+            pos = make_initial_positions(self.n_particles, box, rng)
+            vel = rng.normal(size=(self.n_particles, 3))
 
             pos_list.append(pos)
             vel_list.append(vel)
@@ -484,42 +616,54 @@ def get_vdw_laws(a, b, N):
 
     return vdw_P, vdw_V, vdw_T
 
+CALIB_TEMPS = (2.0, T_BOYLE, 5.0)
+CALIB_RHOS = tuple(np.linspace(0.05, 0.40, 8))
+
+
+def calibration_file(n_particles):
+    """Repo-local JSON cache of the fitted (a, b) for a given particle number."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        f"gas_vdw_calibration_N{n_particles}.json")
+
+
 def perform_full_calibration(low_level_model, rng: Optional[np.random.Generator] = None):
-    if rng is None:
-        rng = np.random.default_rng()
-    np.random.seed(rng.integers(2 ** 31))
-    if os.path.exists(CALIB_FILE):
-        with open(CALIB_FILE, "rb") as f: return pickle.load(f)
-    print("Calibrating (this may take a minute)...")
+    """Fit the van der Waals constants (a, b) to the simulated fluid.
 
-    # Run calibration NVT sweeps, sampling different densities at a fixed temp
-    rhos = np.linspace(0.05, 0.40, 8)
-    data_rho, data_p = [], []
+    NVT runs on a grid of supercritical isotherms (T = 2, T_Boyle, 5) and densities
+    rho in [0.05, 0.40], then a joint least-squares fit of P = rho T / (1 - b rho) - a rho^2.
+    Several isotherms are needed: on the Boyle isotherm alone the second virial
+    coefficient b - a/T vanishes, so a and b are not separately identifiable.
+    The result is cached per particle number.
+    """
+    path = calibration_file(low_level_model.N)
+    if os.path.exists(path):
+        with open(path) as f:
+            d = json.load(f)
+        return d["a"], d["b"]
+    rng = rng if rng is not None else np.random.default_rng(0)
+    print("Calibrating van der Waals constants (NVT sweep over 3 isotherms)...")
 
-    for r in rhos:
-        v = N_PARTICLES / r
-        state = SystemState()
-        # forward_with_interventions handles the physics loop (minimize -> NVT)
-        res = low_level_model.forward_with_interventions(state, {
-            "volume": [v], "temperature": [T_BOYLE]
-        })
-        p_val = res['pressure'][0]
-        data_rho.append(r)
-        data_p.append(p_val)
-        print(f"  Calib: Rho={r:.3f}, P={p_val:.4f}")
+    data_t, data_rho, data_p = [], [], []
+    for t in CALIB_TEMPS:
+        for r in CALIB_RHOS:
+            res = low_level_model.forward_with_interventions(SystemState(), {
+                "volume": [low_level_model.N / r], "temperature": [t]
+            }, rng=rng)
+            p_val = float(res['pressure'][0, 0])
+            data_t.append(t); data_rho.append(r); data_p.append(p_val)
+            print(f"  Calib: T={t:.3f} rho={r:.3f} P={p_val:.4f}")
 
-    # Fit Van der Waals equation of state
-    def vdw_iso(rho, a, b):
-        # P = rho*T / (1 - b*rho) - a*rho^2
-        denom = 1 - b * rho
-        # Numerical stability for fitting only
-        denom[denom < 0.01] = 0.01
-        return (rho * T_BOYLE) / denom - a * (rho ** 2)
+    def vdw_surface(x, a, b):
+        t, rho = x
+        denom = np.maximum(1 - b * rho, 0.01)  # numerical stability for fitting only
+        return (rho * t) / denom - a * (rho ** 2)
 
-    popt, _ = curve_fit(vdw_iso, np.array(data_rho), np.array(data_p),
+    popt, _ = curve_fit(vdw_surface, (np.array(data_t), np.array(data_rho)), np.array(data_p),
                         p0=[4.0, 1.0], bounds=([0, 0.1], [20, 2]))
-
-    print(f"  Result: a={popt[0]:.2f}, b={popt[1]:.2f}")
-    with open(CALIB_FILE, "wb") as f:
-        pickle.dump(tuple(popt), f)
-    return popt
+    a, b = float(popt[0]), float(popt[1])
+    print(f"  Result: a={a:.3f}, b={b:.3f}")
+    with open(path, "w") as f:
+        json.dump({"a": a, "b": b, "n_particles": low_level_model.N,
+                   "temps": list(CALIB_TEMPS), "rhos": list(CALIB_RHOS),
+                   "points": [list(z) for z in zip(data_t, data_rho, data_p)]}, f, indent=1)
+    return a, b

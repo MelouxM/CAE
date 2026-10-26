@@ -27,9 +27,12 @@ Value map:
   of the differential equations.
 
 Additional details:
-- We calibrate the LV parameters (alpha, beta, gamma, delta) once against the
-  simplest, most idealized ABM (Non-spatial, Deterministic, No Aging).
-- We then freeze this high-level model and evaluate its error against all 8 ABM variants.
+- The simplest ABM (non-spatial, deterministic, no aging) is exactly the explicit-Euler
+  discretization (dt = 1 tick) of the LV equations, with alpha = prey_reproduce_prob,
+  beta = predation_prob, delta = predator_reproduce_prob * predation_prob and
+  gamma = predator_starvation_prob (see `lv_params_from_config`). The valid
+  condition is therefore an exact control: the high-level model is correct by construction.
+- We freeze this high-level model and evaluate its error against all 8 ABM variants.
 - This measures how much the textbook abstraction degrades as real-world
   complexities (space, noise, biology) are introduced.
 """
@@ -38,12 +41,17 @@ import itertools
 
 import numpy as np
 import numba
-from tqdm import tqdm
 
 from causal_abstraction import LowLevelModel, SystemState
 
 
 # Simulation kernels (Numba-accelerated)
+
+@numba.njit
+def seed_numba(seed):
+    """Seed the generator used inside Numba-compiled code (separate from NumPy's)."""
+    np.random.seed(seed)
+
 
 @numba.njit
 def _run_nonspatial_step(prey, pred, params, use_stochastic, use_aging):
@@ -55,10 +63,14 @@ def _run_nonspatial_step(prey, pred, params, use_stochastic, use_aging):
     d_prey_age = params[4]
     d_pred_age = params[5]
 
-    if prey < 1 or pred < 1:
-        return 0.0, 0.0
-
+    # An extinct species stays extinct, but the other one keeps its own dynamics (prey
+    # without predators grow, predators without prey starve). Below one individual the
+    # stochastic variant has nobody left to draw for, so it is truncated to zero.
     if use_stochastic:
+        if prey < 1:
+            prey = 0.0
+        if pred < 1:
+            pred = 0.0
         births = np.random.binomial(int(prey), r_prey)  # Stochastic (binomial) dynamics
 
         # Predation interactions (capped below at the number of prey)
@@ -258,7 +270,7 @@ class AgentBasedModel(LowLevelModel):
         self.stochastic = self.cfg.get('stochastic_reproduction', False)
         self.aging = self.cfg.get('agent_aging', False)
 
-    def step(self, state: SystemState) -> SystemState:
+    def step(self, state: SystemState, rng=None) -> SystemState:
         """
         Advance the ABM by one macro-step (self.steps ABM ticks).
 
@@ -282,13 +294,17 @@ class AgentBasedModel(LowLevelModel):
         result = self.forward_with_interventions(
             SystemState(),
             {'prey_t': np.array([prey]), 'predator_t': np.array([pred])},
+            rng=rng,
         )
         pops = np.asarray(result.values['final_populations']).ravel()
         result.values['prey_t'] = np.array([float(pops[0])])
         result.values['predator_t'] = np.array([float(pops[1]) if len(pops) > 1 else 0.0])
         return result
 
-    def forward_with_interventions(self, input_state: SystemState, interventions: dict) -> SystemState:
+    def forward_with_interventions(self, input_state: SystemState, interventions: dict,
+                                   rng=None) -> SystemState:
+        if rng is not None:
+            seed_numba(int(rng.integers(2 ** 31 - 1)))
         # Resolve inputs (handling defaults and interventions)
         def get_input(name, default):
             val = interventions.get(name, input_state.get(name, default))
@@ -340,53 +356,26 @@ def solve_lotka_volterra(prey_t, predator_t, high_level_model_params):
     prey, pred = float(prey_t), float(predator_t)
     dt_steps = high_level_model_params['dt']
 
-    # Euler integration to match discrete steps of low-level model
+    # Explicit Euler with dt = 1 tick, matching the discrete steps of the low-level model
+    # (populations are clamped at zero, as in the ABM)
     for _ in range(dt_steps):
-        if prey < 1e-3 or pred < 1e-3:
-            break
         d_prey = (high_level_model_params['alpha'] * prey) - (high_level_model_params['beta'] * prey * pred)
         d_pred = (high_level_model_params['delta'] * prey * pred) - (high_level_model_params['gamma'] * pred)
-        prey += d_prey
-        pred += d_pred
+        prey = max(0.0, prey + d_prey)
+        pred = max(0.0, pred + d_pred)
 
-    return np.array([max(0.0, prey), max(0.0, pred)])
+    return np.array([prey, pred])
 
-def calibrate_high_level_model(low_level_model_ideal, search_space):
-    """
-    Fits LV parameters to the "ideal" low-level model (non-spatial, deterministic).
-    """
-    print("Calibrating high-level model on ideal low-level model")
-
-    # Target: Run the Ideal low-level model from a standard starting point
-    init_state = SystemState(values={
-        'prey_t': np.array([100.0]),
-        'predator_t': np.array([40.0])
-    })
-
-    res = low_level_model_ideal.forward(init_state)
-    target_vec = res['final_populations'][0]
-
-    print(f"Target outcome: Prey={target_vec[0]:.1f}, Pred={target_vec[1]:.1f}")
-
-    # Grid search
-    param_names = list(search_space.keys())
-    grid = list(itertools.product(*search_space.values()))
-
-    best_p, min_err = None, float('inf')
-
-    for p_tuple in tqdm(grid, desc="Fitting params"):
-        curr = dict(zip(param_names, p_tuple))
-        curr['dt'] = low_level_model_ideal.steps
-
-        high_level_model_out = solve_lotka_volterra(100.0, 40.0, curr)
-        err = np.sum((high_level_model_out - target_vec)**2)
-
-        if err < min_err:
-            min_err = err
-            best_p = curr
-
-    print(f"Best Parameters: {best_p}")
-    return best_p
+def lv_params_from_config(config_dict):
+    """LV parameters matching the ideal ABM (one tick = one explicit Euler step)."""
+    p = config_dict['predation_prob']
+    return {
+        'alpha': config_dict['prey_reproduce_prob'],
+        'beta': p,
+        'delta': config_dict['predator_reproduce_prob'] * p,
+        'gamma': config_dict['predator_starvation_prob'],
+        'dt': config_dict['num_steps'],
+    }
 
 
 def main():

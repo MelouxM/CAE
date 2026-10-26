@@ -1,5 +1,5 @@
 """
-Metrics that analyse properties of the high-level model E and low-level
+Metrics that analyze properties of the high-level model E and low-level
 model M without comparing two CausalPaths. Unlike EvaluationMetric, these metrics
 compute properties directly from the model components.
 
@@ -21,11 +21,11 @@ import numpy as np
 BOUNDED_METRICS = {'hard', 'jsd', 'mmd', 'hsic'}
 
 def bound_and_normalize(result: float, inner_metric: str):
-    """Clip bounded inner metrics to [0, 1]; squash others via ``tanh(|result|)``.
+    """Clip bounded inner metrics to [0, 1]; squash others via `tanh(|result|)`.
 
     Args:
         result: The raw metric value.
-        inner_metric: The inner metric name; if it is in ``BOUNDED_METRICS`` the
+        inner_metric: The inner metric name; if it is in `BOUNDED_METRICS` the
             result is clipped, otherwise it is squashed.
 
     Returns:
@@ -42,12 +42,12 @@ class AnalyticalMetric(ABC):
     """
     Abstract base class for non-path-based analytical metrics.
 
-    Subclasses implement ``_compute(...)`` which returns a raw float score. The
-    public ``compute()`` method calls ``_compute()`` and, when normalize=True,
-    passes the result through ``_normalize_result()`` which maps it to [0, 1]
-    (0 = perfect, 1 = maximal error) via ``tanh(|score|)``.
+    Subclasses implement `_compute(...)` which returns a raw float score. The
+    public `compute()` method calls `_compute()` and, when normalize=True,
+    passes the result through `_normalize_result()` which maps it to [0, 1]
+    (0 = perfect, 1 = maximal error) via `tanh(|score|)`.
     Subclasses whose score is already in [0, 1] should override
-    ``_normalize_result()`` to return the result unchanged.
+    `_normalize_result()` to return the result unchanged.
     """
 
     def __init__(self, normalize: bool = True):
@@ -83,7 +83,7 @@ class AnalyticalMetric(ABC):
 
     def _normalize_result(self, result: float) -> float:
         """
-        Map the score to [0, 1] via ``tanh(|score|)``.
+        Map the score to [0, 1] via `tanh(|score|)`.
         Overridden in subclasses whose score is already in [0, 1].
         """
         if isinstance(result, float):
@@ -230,10 +230,10 @@ class MallowsCpMetric(AnalyticalMetric):
     where p is the number of fitted proxy parameters (slope + intercept per
     output dimension, i.e. p = 2 * number of scored output variables unless
     n_params is given explicitly), sigma^2 is the mean variance of M's outputs
-    across output dimensions (a reference noise floor; or ``sigma2_ref`` if
+    across output dimensions (a reference noise floor; or `sigma2_ref` if
     given), and N is the number of observations.
 
-    Normalisation: tanh(max(0, Cp - p) / max(N, 1))
+    Normalization: tanh(max(0, Cp - p) / max(N, 1))
       - 0.0 when Cp <= p  (no underfitting penalty; unbiased or overfit)
       - -> 1.0 as Cp >> p (underfitting)
       - Special case RSS ≈ 0 (perfect fit) -> 0.0
@@ -478,7 +478,7 @@ class IBLagrangianMetric(AnalyticalMetric):
                     except Exception:
                         pass
                 # Append Y and the per-sample abstract label T together so the two
-                # lists stay index-aligned (one entry per sample) for I(T; Y).
+                # lists stay index-aligned (one entry per sample) for I(T; Y)
                 if out_scalars and sample_abstract:
                     output_vals.append(float(np.mean(out_scalars)))
                     abstract_y_vals.append(float(np.mean(sample_abstract)))
@@ -493,7 +493,7 @@ class IBLagrangianMetric(AnalyticalMetric):
             )
 
         # I(T; Y) - observational, using the per-sample abstract label and the
-        # per-sample abstracted low-level output (aligned 1:1 by construction).
+        # per-sample abstracted low-level output (aligned 1:1 by construction)
         i_ty = 0.0
         if len(abstract_y_vals) >= 4:
             i_ty = self._binned_mi(
@@ -696,13 +696,13 @@ class MacroscopicInvarianceMetric(AnalyticalMetric):
     Tests whether the low-level model output distribution is invariant to which
     micro-state within an abstract cell is used.
 
-    For each abstract variable v and each label l, we sample ``n_pairs``
+    For each abstract variable v and each label l, we sample `n_pairs`
     pairs of distinct micro-states (x1, x2) that both map to label l under
     the current ValueMap.  We run the low-level model on each and measure the divergence
     of the abstracted outputs.
 
     High invariance (low divergence) = the output depends only on the
-    abstract label, not on the specific micro-realisation -> macroscopic
+    abstract label, not on the specific micro-realization -> macroscopic
     invariance holds.
 
     Args:
@@ -1114,8 +1114,7 @@ class IIAMetric(AnalyticalMetric):
             name for name in high_level_model.variables
             if not high_level_model._nodes.get(name, {}).get('parents')
         }
-        # Default to output (sink) variables only (nodes with no children),
-        # matching the paper's "IIA checks consistency only at output variables".
+        # By default, only score the output (sink) variables
         leaf_names = {
             name for name in var_names
             if not high_level_model._adjacency.get(name)
@@ -1329,7 +1328,7 @@ class BCCMetric(AnalyticalMetric):
         root_names = [v.name for v in high_level_model.get_roots() if v.name in value_map.specs]
         if not root_names:
             # No mapped root variables: fall back to all mapped variables so the
-            # complete-state pair remains well-defined.
+            # complete-state pair remains well-defined
             root_names = list(value_map.specs.keys())
         root_set = set(root_names)
 
@@ -1337,7 +1336,7 @@ class BCCMetric(AnalyticalMetric):
 
         for _ in range(self.n_pairs):
             try:
-                # Draw a complete macro-state: one label per mapped root variable.
+                # Draw a complete macro-state: one label per mapped root variable
                 labels: Dict[str, Any] = {}
                 if is_continuous:
                     spec = sampler.sample_intervention(
@@ -1355,7 +1354,7 @@ class BCCMetric(AnalyticalMetric):
                             raise ValueError(f"no labels for {vn}")
                         labels[vn] = lbl_choices[int(rng.integers(len(lbl_choices)))]
 
-                # Ground the complete state twice (two micro-realizations, same labels).
+                # Ground the complete state twice (two micro-realizations, same labels)
                 spec1: Dict[str, Any] = {}
                 spec2: Dict[str, Any] = {}
                 identity = True
@@ -1368,7 +1367,7 @@ class BCCMetric(AnalyticalMetric):
                     spec2[vn] = {'labels': [labels[vn]], 'micro_values': mv2}
 
                 if identity:
-                    # Every cell re-grounds to the same micro-state -> trivial, skip.
+                    # Every cell re-grounds to the same micro-state -> trivial, skip
                     continue
 
                 ints1 = builder._step_ground_or_passthrough(spec1, rng=rng)
@@ -1484,7 +1483,7 @@ class DCCMetric(AnalyticalMetric):
                             continue
 
                         # Single-variable intervention scope, matching the discrete
-                        # branch below.
+                        # branch below
                         spec1 = {vname: {'labels': [lbl], 'micro_values': mv1}}
                         spec2 = {vname: {'labels': [lbl], 'micro_values': mv2}}
 
@@ -1620,7 +1619,7 @@ class ProbingMetric(AnalyticalMetric):
         n_test = min(50, max(5, n_samples))
         n_total = max(self.n_train + n_test, n_samples)
 
-        # Collect (micro-state, abstract labels) pairs.
+        # Collect (micro-state, abstract labels) pairs
         X_data: List[np.ndarray] = []
         Y_data: Dict[str, List] = {v.name: [] for v in all_vars}
 
@@ -1694,7 +1693,7 @@ class ProbingMetric(AnalyticalMetric):
                 W = self._fit_linear_probe(xt, yt.reshape(-1, 1))
                 y_pred = self._predict_probe(W, xv).ravel()
                 # For exact-match metrics round continuous predictions to nearest
-                # integer so that the discrete label comparison is meaningful.
+                # integer so that the discrete label comparison is meaningful
                 if isinstance(metric, SubspaceCheckMetric):
                     y_pred = np.round(y_pred)
                 score = metric.measure(
@@ -2007,7 +2006,7 @@ class SymbionMetric(AnalyticalMetric):
                     if v is UNMAPPED:
                         return None
                     try:
-                        # Compare all output components (covers vector outputs).
+                        # Compare all output components (covers vector outputs)
                         return np.asarray(v, dtype=float).ravel()
                     except Exception:
                         return None

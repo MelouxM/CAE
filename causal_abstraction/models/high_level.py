@@ -13,10 +13,10 @@ logger = logging.getLogger(__name__)
 
 
 def _equation_accepts_u(equation: Callable) -> bool:
-    """Whether a structural equation can receive the exogenous-noise keyword ``u``.
+    """Whether a structural equation can receive the exogenous-noise keyword `u`.
 
-    True if the callable declares a ``u`` parameter or accepts arbitrary keywords
-    (``**kwargs``). Callables whose signature cannot be introspected (e.g. some C
+    True if the callable declares a `u` parameter or accepts arbitrary keywords
+    (`**kwargs`). Callables whose signature cannot be introspected (e.g. some C
     builtins) are assumed compatible, leaving responsibility with the caller.
     """
     try:
@@ -69,16 +69,16 @@ class CausalGraph:
             parents: List of parent variable names.
             distribution: (Optional) If 'variable' is a string, defines its discrete probability.
             domain: (Optional) If 'variable' is a string, defines its subspace/domain.
-            noise_dist: (Optional) Exogenous noise distribution ``P_{U_V}`` for this
-                node, making the high-level model a full SCM. ``None`` (the default)
-                keeps the node deterministic. When given, the node is stochastic: ``predict`` draws a
-                noise value and passes it to ``equation`` via the ``u`` keyword, so
-                ``equation`` must accept a ``u`` parameter (or ``**kwargs``). A
-                point-mass ``noise_dist`` reproduces deterministic behavior.
+            noise_dist: (Optional) Exogenous noise distribution `P_{U_V}` for this
+                node, making the high-level model a full SCM. `None` (the default)
+                keeps the node deterministic. When given, the node is stochastic: `predict` draws a
+                noise value and passes it to `equation` via the `u` keyword, so
+                `equation` must accept a `u` parameter (or `**kwargs`). A
+                point-mass `noise_dist` reproduces deterministic behavior.
 
         Raises:
-            ValueError: If ``variable`` is neither a string nor an AbstractVariable,
-                or if ``noise_dist`` is given but ``equation`` cannot receive ``u``.
+            ValueError: If `variable` is neither a string nor an AbstractVariable,
+                or if `noise_dist` is given but `equation` cannot receive `u`.
         """
         if parents is None:
             parents = []
@@ -102,7 +102,7 @@ class CausalGraph:
             raise ValueError("variable must be a string or AbstractVariable")
 
         # Opt-in exogenous noise: a stochastic node's equation must be able to
-        # receive the noise draw via ``u`` (or **kwargs). Fail loud at construction
+        # receive the noise draw via `u` (or **kwargs). Fail loud at construction
         # rather than silently corrupting results at predict() time.
         if noise_dist is not None and not _equation_accepts_u(equation):
             raise ValueError(
@@ -138,9 +138,9 @@ class CausalGraph:
 
     @property
     def is_stochastic(self) -> bool:
-        """True if any node carries an exogenous noise distribution ``P_U``.
+        """True if any node carries an exogenous noise distribution `P_U`.
 
-        When False (the default), ``predict`` runs deterministically with no RNG use.
+        When False (the default), `predict` runs deterministically with no RNG use.
         """
         return any(n.get('noise_dist') is not None for n in self._nodes.values())
 
@@ -195,9 +195,9 @@ class CausalGraph:
         Args:
             interventions: Mapping of variable name to clamped value.
             u: (Optional) Per-node exogenous-noise realizations, keyed by variable
-                name, for stochastic nodes (those added with a ``noise_dist``). A
+                name, for stochastic nodes (those added with a `noise_dist`). A
                 stochastic node absent from this mapping draws from its own
-                ``noise_dist``. Ignored for deterministic nodes. Keyword-only.
+                `noise_dist`. Ignored for deterministic nodes. Keyword-only.
             rng: (Optional) Generator used for the exogenous-noise draws of stochastic
                 nodes. Unused when the model is deterministic. Keyword-only.
 
@@ -238,11 +238,11 @@ class CausalGraph:
             noise_dist = node_info.get('noise_dist')
             try:
                 if noise_dist is None:
-                    # Deterministic node: equation called with parent kwargs only.
+                    # Deterministic node: equation called with parent kwargs only
                     results[var_name] = node_info['equation'](**parent_values)
                 else:
                     # Stochastic node: draw (or read) the exogenous noise U_V and pass
-                    # it to the mechanism via the keyword ``u``. The draw uses the
+                    # it to the mechanism via the keyword `u`. The draw uses the
                     # seeded, threaded rng so CAE numbers stay reproducible.
                     if u is not None and var_name in u:
                         u_v = u[var_name]

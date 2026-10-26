@@ -19,7 +19,7 @@ class ValueMap:
     """The value map tau in constructive causal abstraction.
 
     Per macro-variable X, tau maps between micro-states and abstract labels:
-    :meth:`abstract` (micro-values -> label) and :meth:`ground` (label ->
+    `abstract` (micro-values -> label) and `ground` (label ->
     micro-values), the latter being the inverse value map sampled from the
     label's subspace.
     """
@@ -31,7 +31,7 @@ class ValueMap:
         """
         Args:
             cg_map: The structural coarse-graining definition (a).
-            variable_specs: Maps each variable name to a ``{label: Subspace}`` dict.
+            variable_specs: Maps each variable name to a `{label: Subspace}` dict.
             transforms: Optional functions to pre-process micro-values before abstraction.
         """
         self.cg_map = cg_map
@@ -49,11 +49,11 @@ class ValueMap:
             micro_values: The micro-state to abstract.
 
         Returns:
-            The matching ``StateLabel``, or ``UNMAPPED`` if no subspace contains
-            ``micro_values``.
+            The matching `StateLabel`, or `UNMAPPED` if no subspace contains
+            `micro_values`.
 
         Raises:
-            ValueError: If no value spec is defined for ``abstract_var_name``.
+            ValueError: If no value spec is defined for `abstract_var_name`.
         """
         # Instance-level override hook
         if hasattr(self, '_custom_abstract'):
@@ -74,7 +74,7 @@ class ValueMap:
 
     def ground(self, abstract_var_name: str, label: StateLabel,
                rng: Optional[np.random.Generator] = None) -> np.ndarray:
-        """Sample a micro-value realizing ``label`` (the inverse value map).
+        """Sample a micro-value realizing `label` (the inverse value map).
 
         Args:
             abstract_var_name: The macro-variable whose value map to invert.
@@ -82,11 +82,11 @@ class ValueMap:
             rng: Optional generator for reproducible sampling from the subspace.
 
         Returns:
-            A micro-value sampled from the subspace associated with ``label``.
+            A micro-value sampled from the subspace associated with `label`.
 
         Raises:
-            ValueError: If no value spec is defined for ``abstract_var_name``, or
-                ``label`` is not one of its defined labels.
+            ValueError: If no value spec is defined for `abstract_var_name`, or
+                `label` is not one of its defined labels.
         """
         if hasattr(self, '_custom_ground'):
             return self._custom_ground(label)
@@ -101,6 +101,25 @@ class ValueMap:
         subspace = subspaces[label]
         sample = subspace.sample((1, subspace.dim), rng=rng)
         return sample.squeeze(0)
+
+    def ground_joint(self, labels: Dict[str, StateLabel],
+                     rng: Optional[np.random.Generator] = None) -> Optional[Dict[str, np.ndarray]]:
+        """Ground several macro-variables whose cells overlap, in one go.
+
+        Systems with overlapping cells can override this to return one micro-state
+        that realizes all the labels at once. The default returns None, and the
+        engine then skips the sample and reports it.
+
+        Args:
+            labels: `{macro-variable: label}` for the intervened variables whose
+                cells overlap (one sample, no batch axis).
+            rng: Optional generator for reproducible sampling.
+
+        Returns:
+            `{micro-variable: value}` covering the union of the cells (each value a
+            1-D array over the whole micro-variable), or None if not supported.
+        """
+        return None
 
     def validate_surjectivity(self, n_samples: int = 100, strict_discrete: bool = True,
                               rng: Optional[np.random.Generator] = None) -> bool:
@@ -169,7 +188,7 @@ class ContinuousValueMap(ValueMap):
             val: The micro-value(s) to abstract.
 
         Returns:
-            A float for scalar input, otherwise the array of labels (shape ``(B, d)``
+            A float for scalar input, otherwise the array of labels (shape `(B, d)`
             for batched input).
         """
         arr = np.asarray(val, dtype=float)
@@ -193,7 +212,7 @@ class ContinuousValueMap(ValueMap):
             rng: Unused; accepted for signature compatibility with the base map.
 
         Returns:
-            ``label`` as a float array.
+            `label` as a float array.
         """
         return np.asarray(label, dtype=float)
 

@@ -1,0 +1,38 @@
+cff-version: 1.2.0
+message: "If you use this library or benchmark, please cite the paper below."
+title: "causal_abstraction_eval: Validating Causal Abstraction Metrics on Simulated Complex Systems"
+type: software
+version: "1.1.0"
+date-released: "2026-10-26"
+license: MIT
+repository-code: "https://github.com/MelouxM/CAE"
+authors:
+  - family-names: "Méloux"
+    given-names: "Maxime"
+  - family-names: "Pimentel"
+    given-names: "Tiago"
+  - family-names: "Portet"
+    given-names: "François"
+  - family-names: "Peyrard"
+    given-names: "Maxime"
+preferred-citation:
+  type: conference-paper
+  title: "Validating Causal Abstraction Metrics on Simulated Complex Systems"
+  authors:
+    - family-names: "Méloux"
+      given-names: "Maxime"
+    - family-names: "Pimentel"
+      given-names: "Tiago"
+    - family-names: "Portet"
+      given-names: "François"
+    - family-names: "Peyrard"
+      given-names: "Maxime"
+  collection-title: "Advances in Neural Information Processing Systems"
+  conference:
+    name: "NeurIPS 2026"
+  year: 2026
+  url: "https://openreview.net/forum?id=q05m7XZ9Y9"
+  identifiers:
+    - type: other
+      value: "arXiv:2607.00267"
+      description: "arXiv preprint"

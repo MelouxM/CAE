@@ -63,8 +63,11 @@ from causal_abstraction import (
     RMSEMetric, BottomUpSampler,
 )
 from causal_abstraction.schema import Variable
-from causal_abstraction.tasks import StandardTasks
+from causal_abstraction.tasks import StandardTasks, ZennaroTasks
 from runner import Condition, run_suite
+
+# ISIL/IC: number of cells (all models are deterministic, so one draw per cell)
+ISIL_IC_N = 100
 
 
 # Shared metric builders
@@ -72,7 +75,7 @@ from runner import Condition, run_suite
 def _continuous_tasks(builder, sampler, out):
     td = sampler
     bu = BottomUpSampler(sampler.value_map)
-    return [
+    return ZennaroTasks.suite(builder, n_instances=ISIL_IC_N) + [
         StandardTasks.score(builder, sampler=td, name="CAE_down_nf"),
         StandardTasks.score(builder, sampler=bu, name="CAE_up_nf"),
         StandardTasks.score(builder, sampler=td, name="CAE_down",
@@ -115,7 +118,7 @@ def _continuous_analytical(out, n):
 def _discrete_tasks(builder, sampler, out):
     td = sampler
     bu = BottomUpSampler(sampler.value_map)
-    return [
+    return ZennaroTasks.suite(builder, n_instances=ISIL_IC_N) + [
         StandardTasks.score(builder, sampler=td, name="CAE_down_nf"),
         StandardTasks.score(builder, sampler=bu, name="CAE_up_nf"),
         StandardTasks.score(builder, sampler=td, name="CAE_down",
@@ -185,11 +188,7 @@ def _exp1_init():
                     spatial=False, stochastic_reproduction=False, agent_aging=False)
     base_abm = pp.AgentBasedModel(base_cfg)
 
-    search = dict(alpha=np.linspace(0.08, 0.12, 3),
-                  beta=np.linspace(0.0008, 0.0012, 3),
-                  delta=np.linspace(0.0004, 0.0006, 3),
-                  gamma=np.linspace(0.04, 0.06, 3))
-    high_level_model_params = pp.calibrate_high_level_model(base_abm, search)
+    high_level_model_params = pp.lv_params_from_config(base_cfg)
 
     prey_dom = RectSubspace((50, 250))
     pred_dom = RectSubspace((20, 100))
@@ -540,7 +539,7 @@ def parse_controlled_args(argv=None):
 if __name__ == "__main__":
     args = parse_controlled_args()
     exp_ids = args.experiment or sorted(EXPERIMENTS.keys())
-    runner_args = SimpleNamespace(metrics=args.metrics, runs=100)
+    runner_args = SimpleNamespace(metrics=args.metrics, runs=args.runs if args.runs is not None else 100)
 
     for eid in exp_ids:
         if eid not in EXPERIMENTS:

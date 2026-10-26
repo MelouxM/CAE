@@ -107,7 +107,7 @@ class InterventionApplicator:
 
             if indices is not None:
                 if isinstance(indices, int) and val_to_assign.ndim == target.ndim:
-                    # Usually indices for 3D is a slice or list (batch, 1, 1).
+                    # Usually indices for 3D is a slice or list (batch, 1, 1)
                     val_to_assign = val_to_assign.squeeze(-1)
                 target[:, :, indices] = val_to_assign
             else:
@@ -219,7 +219,7 @@ class NeuralModel(LowLevelModel):
 
         Raises:
             ImportError: If PyTorch is not installed.
-            ValueError: If a ``layer_map`` module name is not found in the network.
+            ValueError: If a `layer_map` module name is not found in the network.
 
         Example:
             schema = NeuralModel.infer_schema(network, layer_map, input_shape=(2,))
@@ -292,7 +292,7 @@ class NeuralModel(LowLevelModel):
 
         Raises:
             ImportError: If PyTorch is not installed.
-            ValueError: If a ``layer_map`` module name is not found in the network.
+            ValueError: If a `layer_map` module name is not found in the network.
 
         Example:
             model, schema = NeuralModel.from_network(network, layer_map, input_shape=(2,))
@@ -314,15 +314,15 @@ class NeuralModel(LowLevelModel):
         """Run the network, applying interventions and capturing mapped activations.
 
         Args:
-            input_state: Initial state; uses the ``'input'`` value if present,
-                otherwise the first array value, otherwise zeros of ``input_shape``.
+            input_state: Initial state; uses the `'input'` value if present,
+                otherwise the first array value, otherwise zeros of `input_shape`.
             interventions: Mapping of micro-variable name to an intervention spec.
 
         Returns:
-            ``input_state`` merged with the captured activations and the ``'output'``.
+            `input_state` merged with the captured activations and the `'output'`.
 
         Raises:
-            ValueError: If the input state is empty and no ``input_shape`` is set.
+            ValueError: If the input state is empty and no `input_shape` is set.
         """
         interventions = interventions or {}
         captured_activations = {}
@@ -352,7 +352,7 @@ class NeuralModel(LowLevelModel):
                 module = self._module_dict.get(module_name)
                 if module is None:
                     # A mapped micro-variable whose module name does not resolve
-                    # would otherwise be silently skipped; warn instead.
+                    # would otherwise be silently skipped; warn instead
                     warnings.warn(
                         f"NeuralModel: layer_map entry {micro_name!r} -> "
                         f"{module_name!r} matches no module in the network; "

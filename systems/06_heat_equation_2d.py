@@ -16,11 +16,14 @@ High-level model:
 
 Coarse-graining:
 - Micro -> Macro: Spatial smoothing (Gaussian filter) of atomic kinetic energies.
-- This creates a continuous field from discrete point masses.
+- This creates a continuous field from discrete point masses. The filter preserves the
+  total, so the macro field keeps the energy scale: for a harmonic lattice the kinetic
+  energy is on average half of the injected energy (equipartition), and the high-level
+  model predicts (source_E / 2) times the diffused unit-mass kernel.
 
 Value map:
 - Identity mapping for control parameters (Source X, Y, Energy).
-- Continuous field mapping for the output temperature map.
+- Continuous field mapping for the output kinetic-energy map.
 
 Conditions evaluated (see test/06_heat_equation_2d.py):
 - Valid (high scattering): Valid abstraction. Atoms thermalize locally.
@@ -49,6 +52,12 @@ logger = logging.getLogger(__name__)
 
 
 #Physics engine (Numba)
+@njit
+def seed_numba(seed):
+    """Seed the generator used inside Numba-compiled code (separate from NumPy's)."""
+    np.random.seed(seed)
+
+
 @njit
 def compute_forces_lattice(pos, shape, k_spring):
     H, W = shape
@@ -158,7 +167,7 @@ class PhononLatticeModel(LowLevelModel):
         ke = 0.5 * self.mass * np.sum(vel ** 2, axis=1)
         return ke.reshape((self.H, self.W))
 
-    def _run_single_instance(self, source_x, source_y, source_E):
+    def _run_single_instance(self, source_x, source_y, source_E, gen):
         pos = self.pos0.copy()
         vel = np.zeros_like(pos)
 
@@ -170,7 +179,7 @@ class PhononLatticeModel(LowLevelModel):
             cy = np.clip(cy, 3, self.H - 4)
             idx = cy * self.W + cx
 
-            angle = np.random.uniform(0, 2 * np.pi)
+            angle = gen.uniform(0, 2 * np.pi)
             v_mag = np.sqrt(2 * source_E / self.mass)
             vel[idx] += np.array([np.cos(angle), np.sin(angle)]) * v_mag
 
@@ -182,7 +191,10 @@ class PhononLatticeModel(LowLevelModel):
         )
         return self.measure_temperature_map(vel)
 
-    def forward_with_interventions(self, input_state: SystemState, interventions: dict) -> SystemState:
+    def forward_with_interventions(self, input_state: SystemState, interventions: dict,
+                                   rng: Optional[np.random.Generator] = None) -> SystemState:
+        gen = rng if rng is not None else np.random.default_rng()
+        seed_numba(int(gen.integers(2 ** 31 - 1)))
         # Standardize inputs to batch arrays
         def get_batch(name, default):
             val = interventions.get(name, input_state.get(name, default))
@@ -204,7 +216,7 @@ class PhononLatticeModel(LowLevelModel):
             # Run N averages to get a statistically stable heatmap
             accum_map = np.zeros((self.H, self.W))
             for _ in range(self.n_averages):
-                accum_map += self._run_single_instance(sx, sy, se)
+                accum_map += self._run_single_instance(sx, sy, se, gen)
 
             avg_map = accum_map / self.n_averages
             results.append(avg_map)
@@ -221,12 +233,22 @@ class PhononLatticeModel(LowLevelModel):
 
 
 # Maps and calibration
-class SpatialValueMap(ContinuousValueMap):
-    """Value map tau: Gaussian-smooths the micro temperature field into the coarse macro field."""
+# Fraction of the injected energy that is kinetic, on average, in a harmonic lattice
+# (equipartition between kinetic and potential energy; measured 0.500 +- 0.001)
+KINETIC_FRACTION = 0.5
 
-    def __init__(self, cg, specs, grid_shape):
+
+class SpatialValueMap(ContinuousValueMap):
+    """Value map tau: Gaussian-smooths the micro kinetic-energy field into the coarse macro field.
+
+    Args:
+        normalize: If True, divide the smoothed field by its total (keeps only the shape).
+    """
+
+    def __init__(self, cg, specs, grid_shape, normalize=False):
         super().__init__(cg, specs)
         self.H, self.W = grid_shape
+        self.normalize = normalize
         # Dynamic smoothing sigma: 5% of grid size (acts as the coarse-graining filter)
         self.sigma = max(0.1, self.H * 0.05)
 
@@ -243,20 +265,20 @@ class SpatialValueMap(ContinuousValueMap):
         if abstract_var_name == "final_temp_map":
             # micro_values is (batch, H, W) or (H, W)
             # Gaussian filter handles batch dimension automatically if axis is specified,
-            # but simpler to loop for explicit normalization.
+            # but simpler to loop for explicit normalization
 
             if micro_values.ndim == 3:
                 res = []
                 for i in range(micro_values.shape[0]):
                     smoothed = gaussian_filter(micro_values[i], sigma=self.sigma)
                     total = np.sum(smoothed)
-                    if total > 1e-9: smoothed /= total
+                    if self.normalize and total > 1e-9: smoothed /= total
                     res.append(smoothed)
                 return np.stack(res)
             else:
                 smoothed = gaussian_filter(micro_values, sigma=self.sigma)
                 total = np.sum(smoothed)
-                if total > 1e-9: smoothed /= total
+                if self.normalize and total > 1e-9: smoothed /= total
                 return smoothed
 
         return micro_values
@@ -296,7 +318,7 @@ def calibrate_alpha_opt(grid_size, p_scatter, sim_time, sigma_smooth, n_calib_av
 #Main
 def run_full_suite(*args, **kwargs):
     """Deprecated shim. Run the evaluation suite from the command line instead:
-    ``python test/06_heat_equation_2d.py`` (built on ``test/runner.run_suite``)."""
+    `python test/06_heat_equation_2d.py` (built on `test/runner.run_suite`)."""
     raise RuntimeError(
         "run_full_suite is not available here; run the 2D heat-equation evaluation "
         "suite directly with `python test/06_heat_equation_2d.py`."

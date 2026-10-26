@@ -218,7 +218,7 @@ def _build_high_level_model(rank_eq_factory):
 
 def run_full_suite(*args, **kwargs):
     """Deprecated shim. Run the evaluation suite from the command line instead:
-    ``python test/08_tracr.py`` (built on ``test/runner.run_suite``)."""
+    `python test/08_tracr.py` (built on `test/runner.run_suite`)."""
     raise RuntimeError(
         "run_full_suite is not available here; run the Tracr evaluation "
         "suite directly with `python test/08_tracr.py`."

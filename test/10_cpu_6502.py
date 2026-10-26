@@ -41,15 +41,18 @@ from causal_abstraction import (
     IIAMetric, BCCMetric, IBLagrangianMetric, CIBLagrangianMetric,
     InfidelityMetric, ProbingMetric, RelationalFidelityMetric,
     SobolSensitivityMetric, ConditionalIndependenceMetric, MMDMetric,
-    MacroscopicInvarianceMetric, MallowsCpMetric, RMSEMetric, SymbionMetric, RectSubspace, BottomUpSampler,
+    MacroscopicInvarianceMetric, MallowsCpMetric, RMSEMetric, SymbionMetric, RectSubspace,
 )
 from causal_abstraction.primitives import SystemState
-from causal_abstraction.tasks import StandardTasks
+from causal_abstraction.tasks import StandardTasks, ZennaroTasks
 from utils import (
     collect_scores, load_results, save_results, n_runs, print_table,
 )
 
 RESULTS_FILE = Path(__file__).parent / "results" / "10_cpu_6502_results.json"
+ISIL_IC_FILE = Path(__file__).parent / "results" / "isil_ic" / "10_cpu_6502_isil_ic_results.json"
+# Set by --isil-ic: run only the ISIL/IC baselines and write to ISIL_IC_FILE
+ISIL_IC = False
 N_SAMPLES    = 200
 OUTPUTS      = _cpu.OUTPUTS
 INPUTS       = _cpu.INPUTS
@@ -178,7 +181,7 @@ if _m < _t:
 
 def _build_tasks(builder, vm):
     s  = _cpu.InstructionSampler(vm)
-    bu = BottomUpSampler(vm)
+    bu = _cpu.InstructionBottomUpSampler(vm)
     return [
         StandardTasks.score(builder, sampler=s,  name="CAE_down_nf"),
         StandardTasks.score(builder, sampler=bu, name="CAE_up_nf"),
@@ -265,8 +268,15 @@ def _build_and_run(cond, run_index, metric_filter=None):
     scores = {}
 
     # Build and filter tasks
-    tasks = _build_tasks(engine.builder, _VM)
-    analytical = _build_analytical()
+    if ISIL_IC:
+        # Deterministic simulators: one replicate per cell is exact
+        tasks = ZennaroTasks.suite(engine.builder, n_instances=N_SAMPLES,
+                                   top_down=_cpu.InstructionSampler(_VM),
+                                   bottom_up=_cpu.InstructionBottomUpSampler(_VM))
+        analytical = []
+    else:
+        tasks = _build_tasks(engine.builder, _VM)
+        analytical = _build_analytical()
 
     if metric_filter is not None:
         mf = set(metric_filter)
@@ -379,7 +389,14 @@ def main():
                         help="Only compute these metrics")
     parser.add_argument("--print-every", type=int, default=5,
                         help="Print table every N complete rounds")
+    parser.add_argument("--isil-ic", action="store_true",
+                        help="Run only the ISIL/IC baselines, into results/isil_ic/")
     args = parser.parse_args()
+
+    global RESULTS_FILE, ISIL_IC
+    if args.isil_ic:
+        ISIL_IC, RESULTS_FILE = True, ISIL_IC_FILE
+        RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     data = load_results(RESULTS_FILE, CONDITIONS)
     metric_filter = args.metrics

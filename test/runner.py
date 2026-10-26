@@ -107,7 +107,7 @@ def run_suite(
         results_file: JSON file for incremental persistence.
         conditions: Condition names (keys in the results dict).
         comparisons: Pairs to compare in the table (cond_a, cond_b, label).
-        build_condition: Factory ``(cond_name, run_index) -> Condition`` that builds
+        build_condition: Factory `(cond_name, run_index) -> Condition` that builds
             everything for one condition + run.
         print_table_every: Print the summary table every N complete rounds.
         args: Pre-parsed CLI args. Parsed from sys.argv if None.
@@ -193,7 +193,7 @@ def run_suite(
             n += 1
 
             if not any_work_done:
-                # All metrics already had data for this round; no need to print.
+                # All metrics already had data for this round; no need to print
                 continue
 
             if n % print_table_every == 0:

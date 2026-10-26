@@ -45,7 +45,7 @@ def _parse_args(argv=None):
 def main():
     args  = _parse_args()
     skip  = set(args.skip)
-    # Run count for systems whose default is 100; others keep their own defaults.
+    # Run count for systems whose default is 100; others keep their own defaults
     fast_runs = args.runs if args.runs is not None else 100
 
     # Order: fast → medium → slow (heat2D → transistor → gas)
@@ -76,7 +76,7 @@ def main():
         print(f"\n{'#' * 60}")
 
         if sys_num == "11":
-            # Controlled experiments: load module and iterate sub-experiments.
+            # Controlled experiments: load module and iterate sub-experiments
             print(f"# System 11 - Controlled experiments ({target_runs} rounds each)")
             print(f"{'#' * 60}")
             m11 = _load("power_11_controlled.py")

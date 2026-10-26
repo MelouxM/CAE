@@ -6,6 +6,7 @@
 include LICENSE
 include THIRD_PARTY
 include README.md
+include CITATION.cff
 include CONTRIBUTING.md
 include requirements.lock
 include pyproject.toml

@@ -55,7 +55,7 @@ class RectSubspace(Subspace):
     """A hyper-rectangular subspace defined by min/max bounds per dimension."""
 
     def __init__(self, *intervals: tuple):
-        """Build a hyper-rectangle from one ``(low, high)`` interval per dimension.
+        """Build a hyper-rectangle from one `(low, high)` interval per dimension.
 
         Raises:
             ValueError: If no intervals are given.
@@ -84,7 +84,7 @@ class RectSubspace(Subspace):
         """Sample uniformly within the rectangle (exponential/normal on infinite bounds).
 
         Raises:
-            ValueError: If ``shape``'s dimension does not match the subspace dim.
+            ValueError: If `shape`'s dimension does not match the subspace dim.
         """
         rng = self._get_rng(rng)
         batch_size, d = shape
@@ -240,7 +240,7 @@ class UnionSubspace(Subspace):
     def volume(self) -> float:
         total = sum(s.volume() for s in self.subspaces)
         # Sums component volumes without accounting for overlaps, so the result
-        # may overestimate; treat PrecisionMetric on a UnionSubspace with care.
+        # may overestimate; treat PrecisionMetric on a UnionSubspace with care
         return total
 
     def loss(self, x: np.ndarray) -> np.ndarray:

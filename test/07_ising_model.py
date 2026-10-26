@@ -1,6 +1,12 @@
 """
 Full evaluation suite for the Ising Model.
-Three conditions: valid, fail, noise.
+Four conditions: valid, fail, rigid, noise.
+
+The low-level model is an Ising lattice whose atoms vibrate (thermostatted at a fixed
+vibrational temperature), with a distance-dependent coupling. The valid high-level model is
+the rigid Ising model with the effective coupling J_eff = <J0 exp(-decay |d - r0|)> measured on
+the vibrating lattice; "rigid" is the textbook model that ignores vibrations (J = J0); "fail"
+doubles the coupling.
 """
 from pathlib import Path
 
@@ -26,12 +32,14 @@ from runner import Condition, run_suite
 
 RESULTS_FILE = Path(__file__).parent / "results" / "07_ising_model_results.json"
 N_SAMPLES    = 30
-CONDITIONS   = ["valid", "fail", "noise"]
+CONDITIONS   = ["valid", "fail", "rigid", "noise"]
 OUTPUTS      = ["PredictedMagnetization"]
-COMPARISONS  = [("valid", "fail", "valid -> fail"), ("valid", "noise", "valid -> noise")]
+COMPARISONS  = [("valid", "fail", "valid -> fail"), ("valid", "rigid", "valid -> rigid (J = J0)"),
+                ("valid", "noise", "valid -> noise")]
 
-GRID_SIDE    = 8
-HIGH_LEVEL_MODEL_SWEEPS   = (500, 200)
+GRID_SIDE    = 12
+VIB_TEMP     = 1.0
+HIGH_LEVEL_MODEL_SWEEPS   = (300, 600)
 
 _D_TEMP  = RectSubspace((0.5, 4.0))
 _D_FIELD = RectSubspace((-0.5, 0.5))
@@ -42,9 +50,12 @@ _VM      = ContinuousValueMap(_CG, {
     "Temperature": {0: _D_TEMP}, "ExternalField": {0: _D_FIELD},
     "PredictedMagnetization": {0: _D_MAG},
 })
-_LOW_LEVEL_MODEL = _ising.MolecularDynamicsIsingModel(grid_side=GRID_SIDE, vibrational_temp=0.0)
+_LOW_LEVEL_MODEL = _ising.MolecularDynamicsIsingModel(grid_side=GRID_SIDE, vibrational_temp=VIB_TEMP)
 _LOW_LEVEL_MODEL.params['equil_sweeps'] = HIGH_LEVEL_MODEL_SWEEPS[0]
 _LOW_LEVEL_MODEL.params['measure_sweeps'] = HIGH_LEVEL_MODEL_SWEEPS[1]
+# A property of the vibrating lattice alone (the lattice does not feel the spins)
+J_EFF = _LOW_LEVEL_MODEL.effective_coupling()
+J0 = _LOW_LEVEL_MODEL.params['J0']
 
 
 def _make_high_level_model(J):
@@ -52,7 +63,7 @@ def _make_high_level_model(J):
     h.add_variable("Temperature", lambda: None, domain=_D_TEMP)
     h.add_variable("ExternalField", lambda: None, domain=_D_FIELD)
     def predict_mag(Temperature, ExternalField):
-        seed = int(round(Temperature, 8) * 1e8) + int(round(ExternalField + 10, 8) * 1e8)
+        seed = _ising.input_seed(Temperature, ExternalField)
         return _ising._run_rigid_simulation(GRID_SIDE, Temperature, ExternalField, J,
                                             HIGH_LEVEL_MODEL_SWEEPS[0], HIGH_LEVEL_MODEL_SWEEPS[1], seed)
     h.add_variable("PredictedMagnetization", predict_mag,
@@ -94,16 +105,16 @@ def _build_analytical():
         ProbingMetric(n_train=max(N_SAMPLES, 80), inner_metric='mse'),
         RelationalFidelityMetric(output_vars=OUTPUTS),
         SobolSensitivityMetric(n_samples=N_SAMPLES, output_vars=OUTPUTS),
-        StructuralDeviationMetric(param_names=["J"], nominal_params={"J": 1.0},
+        StructuralDeviationMetric(param_names=["J"], nominal_params={"J": J_EFF},
                                   make_high_level_model=mk, inner_metric="mse"),
-        CausalSensitivityIndexMetric(param_names=["J"], nominal_params={"J": 1.0},
+        CausalSensitivityIndexMetric(param_names=["J"], nominal_params={"J": J_EFF},
                                      make_high_level_model=mk, inner_metric="mse"),
     ]
 
 
 def build_condition(cond: str, run_index: int) -> Condition:
     seed = run_index * len(CONDITIONS) + CONDITIONS.index(cond)
-    high_level_model  = _make_high_level_model(J=2.0 if cond == "fail" else 1.0)
+    high_level_model  = _make_high_level_model(J={"fail": 2.0 * J_EFF, "rigid": J0}.get(cond, J_EFF))
     low_level_model  = NoisyLowLevelModel(_LOW_LEVEL_MODEL, noise_std=0.05, noise_type='gaussian') if cond == "noise" else _LOW_LEVEL_MODEL
 
     cfg    = EvaluationConfig(metric='mse', seed=seed)

@@ -28,11 +28,18 @@ from .models.low_level import LowLevelModel
 from .sampling import InterventionSampler, TopDownSampler
 from .metrics import get_metric, PrecisionMetric
 from .config import EvaluationConfig
-from .paths import DiagramBuilder, CausalPath
+from .paths import DiagramBuilder, CausalPath, OverlapConflict
 from .experiment import ExperimentResults, AnalyticalResults
 
 logger = logging.getLogger(__name__)
 
+
+
+class _SkippedBatch:
+    """Marker for a batch skipped because it intervened on overlapping cells"""
+
+    def __init__(self, pairs):
+        self.pairs = pairs
 
 class EvaluationEngine:
     """Orchestrates the verification of a causal abstraction."""
@@ -147,7 +154,10 @@ class EvaluationEngine:
                 intervention_spec.update(bg_spec)
 
         results_a = path_a.execute(intervention_spec, rng=rng)
-        results_b = path_b.execute(intervention_spec, rng=rng)
+        try:
+            results_b = path_b.execute(intervention_spec, rng=rng)
+        except OverlapConflict as e:
+            return _SkippedBatch(e.pairs)
 
         common_vars = set(results_a.keys()) & set(results_b.keys())
         vars_to_compare = common_vars
@@ -180,6 +190,30 @@ class EvaluationEngine:
         )
 
         return pairs
+
+    @staticmethod
+    def _drop_skipped(raw_batches: List[Any], task_name: str = "") -> Tuple[List[Any], Dict[str, Any]]:
+        """Remove batches skipped for overlapping cells and summarize them.
+
+        Returns:
+            `(kept_batches, report)`. `report` is empty when nothing was skipped,
+            otherwise `{'n_batches', 'n_skipped', 'pairs': {'X/Y': count}}`.
+        """
+        kept = [r for r in raw_batches if not isinstance(r, _SkippedBatch)]
+        skipped = [r for r in raw_batches if isinstance(r, _SkippedBatch)]
+        if not skipped:
+            return kept, {}
+        pairs: Dict[str, int] = defaultdict(int)
+        for r in skipped:
+            for x, y in r.pairs:
+                pairs[f"{x}/{y}"] += 1
+        report = {"n_batches": len(raw_batches), "n_skipped": len(skipped), "pairs": dict(pairs)}
+        logger.warning(
+            "%s: skipped %d of %d batches that intervened on overlapping cells with no "
+            "joint grounding (ValueMap.ground_joint): %s",
+            task_name or "evaluation", len(skipped), len(raw_batches), dict(pairs),
+        )
+        return kept, report
 
     def _dispatch_parallel_raw(
             self, sampler, path_a, path_b, targets, n_batches, batch_size, max_int, n_jobs,
@@ -221,7 +255,7 @@ class EvaluationEngine:
         score of 1.0, blended with the distributional score from valid pairs.
 
         Returns:
-            A 4-tuple ``(avg_scores, global_se, all_failures, coverage)``: per-variable
+            A 4-tuple `(avg_scores, global_se, all_failures, coverage)`: per-variable
             mean scores, the global standard error, the recorded failure cases, and
             per-variable mapping coverage.
         """
@@ -272,7 +306,7 @@ class EvaluationEngine:
                 vb_full = np.concatenate(all_val_b[var_name])
                 measured_score = float(scorer.measure(va_full, vb_full))
                 if n_total > 0 and n_unmapped > 0:
-                    # weight valid measured score and explicit penalty by sample share.
+                    # weight valid measured score and explicit penalty by sample share
                     n_valid = n_total - n_unmapped
                     frac_valid = n_valid / n_total
                     avg_scores[var_name] = measured_score * frac_valid + 1.0 * (1.0 - frac_valid)
@@ -342,6 +376,152 @@ class EvaluationEngine:
 
         return avg_scores, global_se, all_failures, coverage
 
+    def _score_instance_level(
+        self,
+        raw_batches: List[Dict[str, Tuple[Any, Any]]],
+        scorer,
+        aggregation: str,
+        score_vars: Optional[List[str]] = None,
+        max_failures: int = 50,
+        path_a_name: str = "",
+        path_b_name: str = "",
+    ) -> Tuple[float, Dict[str, float], float, List[Dict], Dict[str, float]]:
+        """
+        Score raw pairs one intervention cell at a time (used by ISIL/IC).
+
+        Each raw batch is one cell. Its variables are scored jointly, then the cell
+        scores are aggregated by max (`'sup'`) or mean (`'inst_mean'`). A cell with
+        an UNMAPPED value scores 1.0, as in the pooled scorer.
+
+        Returns:
+            `(global_score, per_var_scores, global_se, failures, coverage)`.
+            `per_var_scores` apply the same aggregation to each variable alone.
+            `global_se` is 0.0 for `'sup'`.
+        """
+        joint_scores: List[float] = []
+        per_var_values: Dict[str, list] = defaultdict(list)
+        unmapped_counts: Dict[str, int] = defaultdict(int)
+        totals: Dict[str, int] = defaultdict(int)
+        failures: List[Dict] = []
+
+        measure_instance = getattr(scorer, "measure_instance", None)
+
+        for raw in raw_batches:
+            values_a: Dict[str, Any] = {}
+            values_b: Dict[str, Any] = {}
+            unmapped_here = False
+
+            for var_name, (va, vb) in raw.items():
+                if score_vars is not None and var_name not in score_vars:
+                    continue
+                totals[var_name] += 1
+                if va is None or vb is None:
+                    unmapped_counts[var_name] += 1
+                    per_var_values[var_name].append(1.0)
+                    unmapped_here = True
+                    continue
+                values_a[var_name] = va
+                values_b[var_name] = vb
+
+            if not values_a and not unmapped_here:
+                continue
+
+            if unmapped_here:
+                cell_score = 1.0
+            elif measure_instance is not None:
+                cell_score = float(measure_instance(values_a, values_b))
+            else:
+                # Plain dissimilarity: take the worst target variable of the cell
+                cell_score = max(
+                    float(scorer.measure(np.atleast_1d(np.asarray(values_a[v], dtype=float)).ravel(),
+                                         np.atleast_1d(np.asarray(values_b[v], dtype=float)).ravel()))
+                    for v in values_a
+                )
+
+            for var_name in values_a:
+                if measure_instance is not None:
+                    v_score = float(measure_instance({var_name: values_a[var_name]},
+                                                     {var_name: values_b[var_name]}))
+                else:
+                    v_score = float(scorer.measure(
+                        np.atleast_1d(np.asarray(values_a[var_name], dtype=float)).ravel(),
+                        np.atleast_1d(np.asarray(values_b[var_name], dtype=float)).ravel()))
+                per_var_values[var_name].append(v_score)
+
+            joint_scores.append(cell_score)
+
+            if self.config.return_detailed_failures and len(failures) < max_failures \
+                    and cell_score > self.config.error_threshold:
+                failures.append({
+                    "variable": ",".join(sorted(values_a)),
+                    "path_a": path_a_name,
+                    "path_b": path_b_name,
+                    "val_a": {k: self._sanitize_for_json(v) for k, v in values_a.items()},
+                    "val_b": {k: self._sanitize_for_json(v) for k, v in values_b.items()},
+                    "score": cell_score,
+                    "sample_index": len(joint_scores) - 1,
+                })
+
+        if not joint_scores:
+            return float("nan"), {}, 0.0, failures, {}
+
+        arr = np.asarray(joint_scores, dtype=float)
+        finite = arr[~np.isnan(arr)]
+        if aggregation == 'sup':
+            global_score = float(np.max(finite)) if finite.size else float("nan")
+            global_se = 0.0
+        else:
+            global_score = float(np.mean(finite)) if finite.size else float("nan")
+            global_se = (
+                float(np.std(finite, ddof=1) / np.sqrt(finite.size)) if finite.size > 1 else 0.0
+            )
+
+        reduce_fn = np.max if aggregation == 'sup' else np.mean
+        per_var_scores = {
+            var: float(reduce_fn(np.asarray(vals, dtype=float)))
+            for var, vals in per_var_values.items() if len(vals) > 0
+        }
+        coverage = {
+            var: 1.0 - (unmapped_counts.get(var, 0) / totals[var])
+            for var in totals if totals[var] > 0
+        }
+
+        total_unmapped = sum(unmapped_counts.values())
+        if total_unmapped > 0:
+            logger.warning(
+                "UNMAPPED results encountered during instance-level scoring: %s "
+                "(penalty=1.0 applied)", dict(unmapped_counts),
+            )
+
+        return global_score, per_var_scores, global_se, failures, coverage
+
+    def _score_one_task(
+        self,
+        raw_batches: List[Dict[str, Tuple[Any, Any]]],
+        task: EvaluationTask,
+        path_a_name: str,
+        path_b_name: str,
+    ) -> ExperimentResults:
+        """Score one task's collected pairs with the aggregation it declares."""
+        if task.is_instance_level:
+            global_score, avg_scores, global_se, failures, coverage = self._score_instance_level(
+                raw_batches, task.scorer, task.aggregation, score_vars=task.score_vars,
+                path_a_name=path_a_name, path_b_name=path_b_name,
+            )
+        else:
+            avg_scores, global_se, failures, coverage = self._score_collected_results(
+                raw_batches, task.scorer, score_vars=task.score_vars,
+                path_a_name=path_a_name, path_b_name=path_b_name,
+            )
+            global_score = float(np.mean(list(avg_scores.values()))) if avg_scores else float("nan")
+
+        return ExperimentResults(
+            score=global_score, score_se=global_se, score_by_var=avg_scores,
+            failures=failures,
+            metadata={"coverage_by_var": coverage, "aggregation": task.aggregation},
+            config=self.config, name=task.name, metric=task.scorer,
+        )
+
     def _task_group_key(self, task: EvaluationTask,
                         default_sampler: InterventionSampler,
                         default_targets: List[AbstractVariable],
@@ -362,7 +542,7 @@ class EvaluationEngine:
         mi = task.max_interventions if task.max_interventions is not None else default_mi
 
         # Bound methods compare equal when __func__ and __self__ are the same,
-        # so tasks built from the same DiagramBuilder will hash into the same group.
+        # so tasks built from the same DiagramBuilder will hash into the same group
         return (
             tuple(task.path_a.steps),
             task.path_a.exclude_intervened,
@@ -415,7 +595,7 @@ class EvaluationEngine:
         default_sampler = sampler or TopDownSampler(self.value_map)
 
         # Group tasks that can share intervention runs
-        # dict preserves insertion order, so result ordering matches the input task list.
+        # dict preserves insertion order, so result ordering matches the input task list
         groups: Dict[tuple, List[EvaluationTask]] = {}
         for task in tasks:
             key = self._task_group_key(task, default_sampler, default_targets, n_samples, batch_size, max_interventions)
@@ -447,19 +627,13 @@ class EvaluationEngine:
                     task_targets, n_batches, task_bs, task_mi,
                     self.config.n_jobs, task_name=task.name,
                 )
+                raw_batches, skipped = self._drop_skipped(raw_batches, task.name)
 
-                avg_scores, global_se, all_failures, coverage = self._score_collected_results(
-                    raw_batches, task.scorer, score_vars=task.score_vars,
-                    path_a_name=task.path_a.name, path_b_name=task.path_b.name,
+                all_results[task.name] = self._score_one_task(
+                    raw_batches, task, task.path_a.name, task.path_b.name,
                 )
-
-                global_score = float(np.mean(list(avg_scores.values()))) if avg_scores else float("nan")
-                all_results[task.name] = ExperimentResults(
-                    score=global_score, score_se=global_se, score_by_var=avg_scores,
-                    failures=all_failures,
-                    metadata={"coverage_by_var": coverage},
-                    config=self.config, name=task.name, metric=task.scorer,
-                )
+                if skipped:
+                    all_results[task.name].metadata["overlap_skipped"] = skipped
             else:
                 task_names = [t.name for t in group_tasks]
                 logger.debug(f"Running shared interventions for tasks: {task_names}...")
@@ -469,19 +643,14 @@ class EvaluationEngine:
                     task_targets, n_batches, task_bs, task_mi,
                     self.config.n_jobs, task_name=f"shared({','.join(task_names)})",
                 )
+                raw_batches, skipped = self._drop_skipped(raw_batches, ",".join(task_names))
 
                 for task in group_tasks:
-                    avg_scores, global_se, all_failures, coverage = self._score_collected_results(
-                        raw_batches, task.scorer, score_vars=task.score_vars,
-                        path_a_name=first.path_a.name, path_b_name=first.path_b.name,
+                    all_results[task.name] = self._score_one_task(
+                        raw_batches, task, first.path_a.name, first.path_b.name,
                     )
-
-                    global_score = float(np.mean(list(avg_scores.values()))) if avg_scores else float("nan")
-                    all_results[task.name] = ExperimentResults(
-                        score=global_score, score_se=global_se, score_by_var=avg_scores,
-                        failures=all_failures, metadata={"coverage_by_var": coverage},
-                        config=self.config, name=task.name, metric=task.scorer,
-                    )
+                    if skipped:
+                        all_results[task.name].metadata["overlap_skipped"] = skipped
 
         return TaskResults(all_results)
 
@@ -542,7 +711,7 @@ class EvaluationEngine:
             max_interventions: Cap on simultaneous interventions.
             intervention_domain: Variables to intervene on (None = all).
             save_metadata: If True, record run parameters in the result metadata.
-            additional_metadata: Extra metadata merged in when ``save_metadata``.
+            additional_metadata: Extra metadata merged in when `save_metadata`.
             max_failures_to_report: Cap on recorded detailed failure cases.
             custom_paths: Optional (path_a, path_b) overriding the standard paths.
 
@@ -571,6 +740,7 @@ class EvaluationEngine:
             sampler, path_high_level_model, path_low_level_model, target_vars, n_batches, batch_size,
             max_interventions, self.config.n_jobs, task_name="default",
         )
+        raw_batches, skipped = self._drop_skipped(raw_batches)
 
         avg_scores, global_se, all_failures, coverage = self._score_collected_results(
             raw_batches, self.scorer, max_failures=max_failures_to_report,
@@ -609,6 +779,8 @@ class EvaluationEngine:
                 metadata.update(additional_metadata)
         else:
             metadata = {}
+        if skipped:
+            metadata["overlap_skipped"] = skipped
 
         return ExperimentResults(
             score=global_score,
@@ -643,11 +815,11 @@ class EvaluationEngine:
                 engine's own config.
 
         Returns:
-            An AnalyticalResults (``dict`` subclass) mapping ``{metric_class_name:
-            result}``. Successful metrics map to their value; a metric that raised
-            (in non-strict mode) maps to ``{'error': <message>}``. The wrapper adds
-            ``.errors`` / ``.failed`` / ``.succeeded`` / ``.is_error(name)`` so
-            failures can be detected without sniffing for an ``'error'`` key.
+            An AnalyticalResults (`dict` subclass) mapping `{metric_class_name:
+            result}`. Successful metrics map to their value; a metric that raised
+            (in non-strict mode) maps to `{'error': <message>}`. The wrapper adds
+            `.errors` / `.failed` / `.succeeded` / `.is_error(name)` so
+            failures can be detected without sniffing for an `'error'` key.
         """
         if sampler is None:
             sampler = TopDownSampler(self.value_map)
@@ -671,7 +843,7 @@ class EvaluationEngine:
         if errored:
             # Errors are stored as {'error': ...} markers (queryable via
             # results.errors / results.failed); surface an aggregate count too, so a
-            # silently half-failed battery is not mistaken for a clean run.
+            # silently half-failed battery is not mistaken for a clean run
             logger.warning(
                 "%d of %d analytical metric(s) errored and were stored as "
                 "{'error': ...}, not as values: %s. Inspect before treating "

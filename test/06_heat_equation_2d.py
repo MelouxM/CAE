@@ -29,7 +29,7 @@ from causal_abstraction.tasks import StandardTasks
 from runner import Condition, run_suite
 
 RESULTS_FILE = Path(__file__).parent / "results" / "06_heat_equation_2d_results.json"
-N_SAMPLES    = 5
+N_SAMPLES    = 10
 CONDITIONS   = ["valid", "fail", "noise"]
 OUTPUTS      = ["final_temp_map"]
 COMPARISONS  = [("valid", "fail", "valid -> fail"), ("valid", "noise", "valid -> noise")]
@@ -66,7 +66,9 @@ def _make_high_level_model(alpha):
         grid = gaussian_filter(grid, sigma=MAP_SIGMA)
         final = _h2d.solve_heat_pde_neumann(grid, alpha, dt=0.2, steps=int(SIM_TIME / 0.2))
         t = np.sum(final)
-        return final / t if t > 1e-9 else final
+        kernel = final / t if t > 1e-9 else final
+        # Equipartition: on average half the injected energy is kinetic
+        return _h2d.KINETIC_FRACTION * float(source_E) * kernel
     h.add_variable("final_temp_map", predict,
                    parents=["source_x", "source_y", "source_E"], domain=_OUT_T)
     return h
@@ -122,7 +124,7 @@ def build_condition(cond: str, run_index: int) -> Condition:
     seed  = run_index * len(CONDITIONS) + CONDITIONS.index(cond)
     alpha = _ALPHA * 10.0 if cond == "fail" else _ALPHA
     high_level_model   = _make_high_level_model(alpha)
-    low_level_model   = NoisyLowLevelModel(_LOW_LEVEL_MODEL, noise_std=50.0, noise_type='gaussian') if cond == "noise" else _LOW_LEVEL_MODEL
+    low_level_model   = NoisyLowLevelModel(_LOW_LEVEL_MODEL, noise_std=2.0, noise_type='gaussian') if cond == "noise" else _LOW_LEVEL_MODEL
 
     cfg    = EvaluationConfig(metric='mse', seed=seed)
     engine = EvaluationEngine(high_level_model, low_level_model, _VM, _CG, cfg)
@@ -133,7 +135,7 @@ def build_condition(cond: str, run_index: int) -> Condition:
         analytical=_build_analytical(),
         sampler=TopDownSampler(_VM),
         task_kwargs=dict(n_samples=N_SAMPLES, batch_size=1, max_interventions=3,
-                         intervention_domain=["source_x", "source_y"]),
+                         intervention_domain=["source_x", "source_y", "source_E"]),
     )
 
 

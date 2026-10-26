@@ -1,26 +1,23 @@
 """
 Characterization tests for the analytical baseline family
-(``AnalyticalMetric`` subclasses in ``causal_abstraction.analytical_metrics``).
+(`AnalyticalMetric` subclasses in `causal_abstraction.analytical_metrics`).
 
-This module is the safety net for the most logic-dense, previously untested
-part of the library: the 30+ candidate baselines the paper benchmarks against
-CAE. The tests must not change any metric or any reported
-number; they instead pin (snapshot) the value each metric currently produces
-on the small, deterministic 2-bit-adder abstraction. Every expected number in
-``_EXPECTED`` was captured by running the metric on the fixture at a fixed
+These tests pin (snapshot) the value each baseline metric currently produces on
+the small, deterministic 2-bit-adder abstraction. Every expected number in
+`_EXPECTED` was captured by running the metric on the fixture at a fixed
 seed; none is a hand-chosen "correct" value. A future change to a metric
 implementation therefore surfaces here as a failing characterization test
-rather than as a silent drift in ``test/results/*.json``.
+rather than as a silent drift in `test/results/*.json`.
 
 The battery mirrors the analytical metrics wired into the headline benchmark
-suite ``test/01_logic_circuit.py`` and additionally covers the three metrics
+suite `test/01_logic_circuit.py` and additionally covers the three metrics
 the discrete suites omit:
 
-* ``MallowsCpMetric``: runs directly on the adder.
-* ``StructuralDeviationMetric`` / ``CausalSensitivityIndexMetric``: the
-  parameter-perturbation metrics need a ``make_high_level_model`` factory; here
+* `MallowsCpMetric`: runs directly on the adder.
+* `StructuralDeviationMetric` / `CausalSensitivityIndexMetric`: the
+  parameter-perturbation metrics need a `make_high_level_model` factory; here
   it switches between the valid and failing high-level models on a synthetic
-  parameter ``w``, which exercises their full inner-engine code path.
+  parameter `w`, which exercises their full inner-engine code path.
 
 Each metric is pinned at two operating points: a valid abstraction (where
 most baselines collapse to 0) and a failing one, so regressions that move a
@@ -57,14 +54,14 @@ _OUTPUTS = ["Result_Sum", "Result_Carry"]
 
 # Current (snapshot) value of each metric on the adder, captured at seed=0,
 # n_samples=100. {metric_name: {high_level_model_key: value}}. See module docstring; these
-# pin existing behaviour and must never be edited to a "desired" value.
+# pin existing behavior and must never be edited to a "desired" value.
 _EXPECTED = {
     "IIAMetric":                    {"valid": 0.0,                   "failing": 0.30326918430132155},
     "BCCMetric":                    {"valid": 0.0,                   "failing": 0.0},
     "ProbingMetric":                {"valid": 1.000032736824118e-30, "failing": 1.000032736824118e-30},
     # Re-pinned 2026-06-30 to the corrected implementation's captured value after the
-    # authorized I(T;Y) per-sample alignment fix (REPORT item 2 / MET-IB-001); not a "desired" edit.
-    "IBLagrangianMetric":           {"valid": 0.43547196223411105,   "failing": 0.43547196223411105},
+    # authorized I(T;Y) per-sample alignment fix (REPORT item 2 / MET-IB-001); not a "desired" edit
+    "IBLagrangianMetric":           {"valid": 0.41352419528190804,   "failing": 0.41352419528190804},
     "CIBLagrangianMetric":          {"valid": 0.0,                   "failing": 0.0},
     "ComplexityShiftMetric":        {"valid": 0.0,                   "failing": 0.0},
     "SobolSensitivityMetric":       {"valid": 0.0,                   "failing": 0.0},
@@ -85,7 +82,7 @@ def _metric_factories(logic_system):
     failing = logic_system["failing"]
 
     def make_high_level_model(params):
-        # Synthetic 1-parameter family: w>=0.5 -> valid model, else failing.
+        # Synthetic 1-parameter family: w>=0.5 -> valid model, else failing
         return valid if params["w"] >= 0.5 else failing
 
     return {
@@ -149,7 +146,7 @@ def test_analytical_metric_value_pinned(logic_system, name, high_level_model_key
 
 def test_battery_returns_only_finite_floats(logic_system):
     """run_analytical_metrics over the whole battery yields finite floats, never
-    an ``{'error': ...}`` placeholder (guards the aggregation happy-path)."""
+    an `{'error': ...}` placeholder (guards the aggregation happy-path)."""
     factories = _metric_factories(logic_system)
     metrics = [factories[name]() for name in _EXPECTED]
     cfg = EvaluationConfig(metric="mse", seed=_SEED)

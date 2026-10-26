@@ -2,10 +2,10 @@
 Structural causal models used by the framework.
 
 Bundles the two SCMs compared on the commuting diagram: the low-level model
-``M`` (:class:`LowLevelModel`, :class:`~causal_abstraction.models.low_level.NoisyLowLevelModel`)
-and the high-level model ``E`` (:class:`CausalGraph`). Also provides the PyTorch
-wrapper :class:`NeuralModel`, imported lazily (see ``__getattr__``) so that
-``import causal_abstraction.models`` does not require ``torch``.
+`M` (`LowLevelModel`, `NoisyLowLevelModel`)
+and the high-level model `E` (`CausalGraph`). Also provides the PyTorch
+wrapper `NeuralModel`, imported lazily (see `__getattr__`) so that
+`import causal_abstraction.models` does not require `torch`.
 """
 from .low_level import LowLevelModel
 from .high_level import CausalGraph
@@ -18,7 +18,7 @@ __all__ = [
 
 
 def __getattr__(name):
-    # PEP 562 lazy import: defer the torch dependency until NeuralModel is used.
+    # PEP 562 lazy import: defer the torch dependency until NeuralModel is used
     if name == "NeuralModel":
         from .neural import NeuralModel
         return NeuralModel

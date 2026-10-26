@@ -19,14 +19,17 @@ from causal_abstraction import (
     ProbingMetric, RelationalFidelityMetric, SobolSensitivityMetric,
     ConditionalIndependenceMetric, MMDMetric, DCCMetric,
 )
-from causal_abstraction.tasks import StandardTasks
+from causal_abstraction.tasks import StandardTasks, ZennaroTasks
 from runner import Condition, run_suite
 
 RESULTS_FILE = Path(__file__).parent / "results" / "09_grn_results.json"
 N_SAMPLES    = 200
+# ISIL/IC: number of cells, and draws per cell (the noise condition is stochastic)
+ISIL_IC_N    = 200
+ISIL_IC_REPS = {"noise": 20}
 CONDITIONS   = ["valid", "wrong_map", "wrong_high_level_model", "noise"]
-OUTPUTS      = ["fz_tgt"]
-INTERV_VARS  = ["wg_src"]
+OUTPUTS      = _grn.OUTPUT_VARS
+INTERV_VARS  = _grn.ROOT_VARS
 COMPARISONS  = [
     ("valid", "wrong_map", "valid -> wrong_map"),
     ("valid", "wrong_high_level_model", "valid -> wrong_high_level_model"),
@@ -44,12 +47,14 @@ print("Done.\n")
 _CG_VALID, _VM_VALID = _grn.build_valid_cg_vm(_SCHEMA)
 _CG_WRONG, _VM_WRONG = _grn.build_wrong_cg_vm(_SCHEMA)
 _HIGH_LEVEL_MODEL_VALID   = _grn.build_valid_high_level_model()
-_HIGH_LEVEL_MODEL_REVERSED = _grn.build_reversed_high_level_model()
+_HIGH_LEVEL_MODEL_CELL_AUTONOMOUS = _grn.build_cell_autonomous_high_level_model()
 
 
-def _build_tasks(builder, vm):
+def _build_tasks(builder, vm, cond="valid"):
     s, bu = TopDownSampler(vm), BottomUpSampler(vm)
-    return [
+    return ZennaroTasks.suite(
+        builder, n_instances=ISIL_IC_N, n_replicates=ISIL_IC_REPS.get(cond, 1),
+    ) + [
         StandardTasks.score(builder, sampler=s,  name="CAE_down_nf"),
         StandardTasks.score(builder, sampler=s,  name="CAE_down", include_faithfulness=True),
         StandardTasks.score(builder, sampler=bu, name="CAE_up_nf"),
@@ -89,7 +94,7 @@ def build_condition(cond: str, run_index: int) -> Condition:
     high_level_model, low_level_model, cg, vm = {
         "valid":     (_HIGH_LEVEL_MODEL_VALID,    _LOW_LEVEL_MODEL,   _CG_VALID, _VM_VALID),
         "wrong_map": (_HIGH_LEVEL_MODEL_VALID,    _LOW_LEVEL_MODEL,   _CG_WRONG, _VM_WRONG),
-        "wrong_high_level_model": (_HIGH_LEVEL_MODEL_REVERSED, _LOW_LEVEL_MODEL,   _CG_VALID, _VM_VALID),
+        "wrong_high_level_model": (_HIGH_LEVEL_MODEL_CELL_AUTONOMOUS, _LOW_LEVEL_MODEL,   _CG_VALID, _VM_VALID),
         "noise":     (_HIGH_LEVEL_MODEL_VALID,    _NOISY, _CG_VALID, _VM_VALID),
     }[cond]
 
@@ -98,17 +103,17 @@ def build_condition(cond: str, run_index: int) -> Condition:
 
     return Condition(
         engine=engine,
-        tasks=_build_tasks(engine.builder, vm),
+        tasks=_build_tasks(engine.builder, vm, cond),
         analytical=_build_analytical(),
         sampler=TopDownSampler(vm),
         task_kwargs=dict(n_samples=N_SAMPLES, batch_size=1,
-                         max_interventions=1, intervention_domain=INTERV_VARS),
+                         max_interventions=len(INTERV_VARS), intervention_domain=INTERV_VARS),
     )
 
 
 if __name__ == '__main__':
     run_suite(
-        title="GRN Segment Polarity (Wg->Fz)",
+        title="GRN Segment Polarity (Wg/Hh/En loop)",
         results_file=RESULTS_FILE,
         conditions=CONDITIONS,
         comparisons=COMPARISONS,

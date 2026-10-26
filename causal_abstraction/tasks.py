@@ -37,6 +37,17 @@ class EvaluationTask:
         score_vars:          If set, only these output variables are scored.
                              Useful for observational tasks that should only
                              compare outputs, not all intermediate variables.
+        aggregation:         The aggregation operator Agg of the metric family.
+                             `'mean'` (default) is the CAE convention: the
+                             dissimilarity is measured on all samples pooled per
+                             variable, then averaged over variables.  `'sup'` and
+                             `'inst_mean'` are instance-level: the target set of
+                             each sampled cell is scored jointly, giving one
+                             instance-level abstraction error per cell, and those
+                             are aggregated by supremum (`'sup'`) or expectation
+                             (`'inst_mean'`).  The instance-level forms are what
+                             the ISIL/IC baselines require; see
+                             `InstanceJSDMetric`.
     """
     name: str
     path_a: CausalPath
@@ -48,6 +59,20 @@ class EvaluationTask:
     batch_size: Optional[int] = None
     max_interventions: Optional[int] = None
     score_vars: Optional[List[str]] = None   # None = score everything path_a ∩ path_b returns
+    aggregation: str = 'mean'
+
+    AGGREGATIONS = ('mean', 'sup', 'inst_mean')
+
+    def __post_init__(self):
+        if self.aggregation not in self.AGGREGATIONS:
+            raise ValueError(
+                f"aggregation must be one of {self.AGGREGATIONS}, got {self.aggregation!r}."
+            )
+
+    @property
+    def is_instance_level(self) -> bool:
+        """True when the task scores each sampled cell separately (ISIL/IC style)."""
+        return self.aggregation in ('sup', 'inst_mean')
 
 
 class TaskResults:
@@ -71,7 +96,7 @@ class TaskResults:
         return {name: res.score for name, res in self._results.items()}
 
     def items(self):
-        """Iterate over ``(task_name, ExperimentResults)`` pairs, mirroring ``dict.items()``."""
+        """Iterate over `(task_name, ExperimentResults)` pairs, mirroring `dict.items()`."""
         return self._results.items()
 
 
@@ -79,16 +104,16 @@ class StandardTasks:
     """
     Factory for the framework's evaluation tasks.
 
-    Exposes exactly two causal-abstraction tasks, ``CAE_up`` (bottom-up) and
-    ``CAE_down`` (top-down), both produced by :meth:`score`,
-    plus a set of observational baselines (:meth:`observational` and its
-    ``observational_mse`` / ``observational_nmse`` / ``observational_r2`` /
-    ``observational_kl`` / ``observational_jsd`` shortcuts) provided only as
+    Exposes exactly two causal-abstraction tasks, `CAE_up` (bottom-up) and
+    `CAE_down` (top-down), both produced by `score`,
+    plus a set of observational baselines (`observational` and its
+    `observational_mse` / `observational_nmse` / `observational_r2` /
+    `observational_kl` / `observational_jsd` shortcuts) provided only as
     reference points, not as validity metrics.
 
-    Each causal-abstraction task supports an optional ``include_faithfulness``
+    Each causal-abstraction task supports an optional `include_faithfulness`
     parameter.  When True, a
-    :class:`~causal_abstraction.sampling.CombinedFaithfulnessSampler` is
+    `CombinedFaithfulnessSampler` is
     automatically wrapped around the provided (or default) sampler so that
     phi-dummy interventions are mixed into every evaluation iteration.  This
     integrates the faithfulness check directly into the task score: poor
@@ -111,21 +136,21 @@ class StandardTasks:
 
         Args:
             builder: The diagram builder supplying the high- and low-level paths.
-            scorer: Dissimilarity metric D. Defaults to ``get_metric(builder.config)``.
+            scorer: Dissimilarity metric D. Defaults to `get_metric(builder.config)`.
             name: Task label used as the result-JSON key. Required and passed
-                explicitly: one of ``CAE_up`` / ``CAE_down`` (faithful) or
-                ``CAE_up_nf`` / ``CAE_down_nf`` (non-faithful), matching the sampler
-                direction and the ``include_faithfulness`` flag. Naming is explicit
+                explicitly: one of `CAE_up` / `CAE_down` (faithful) or
+                `CAE_up_nf` / `CAE_down_nf` (non-faithful), matching the sampler
+                direction and the `include_faithfulness` flag. Naming is explicit
                 rather than inferred from the sampler type, since a wrapped or
-                subclassed ``BottomUpSampler`` would otherwise misname the key.
+                subclassed `BottomUpSampler` would otherwise misname the key.
             include_faithfulness: If True, mix phi interventions into every iteration.
-            **overrides: Extra ``EvaluationTask`` fields (e.g. ``sampler``, ``n_samples``).
+            **overrides: Extra `EvaluationTask` fields (e.g. `sampler`, `n_samples`).
 
         Returns:
-            The configured ``EvaluationTask``.
+            The configured `EvaluationTask`.
 
         Raises:
-            ValueError: If ``name`` is not provided.
+            ValueError: If `name` is not provided.
         """
         if name is None:
             raise ValueError(
@@ -137,7 +162,7 @@ class StandardTasks:
 
         def _check_direction(s):
             # Guard the CAE_up<->BottomUp / CAE_down<->TopDown alias so a mismatched
-            # sampler can't be silently mislabeled.
+            # sampler can't be silently mislabeled
             is_bu = isinstance(s, BottomUpSampler)
             if name.startswith("CAE_up") and not is_bu:
                 raise ValueError(
@@ -286,3 +311,74 @@ class StandardTasks:
         return StandardTasks.observational(
             builder, JSDivergenceMetric(), sampler=sampler, output_vars=output_vars, name=name, **overrides
         )
+
+
+class ZennaroTasks:
+    """ISIL and IC errors (Zennaro et al., 2023) as evaluation tasks.
+
+    ISIL samples cells top-down and IC bottom-up, like CAE_down and CAE_up. Each
+    cell is scored with `InstanceJSDMetric` and the cells are aggregated by sup
+    (`*_sup`) or mean (`*_mean`). Phi is never intervened on. The sup is the max
+    over the sampled cells, so it is a lower bound of the true sup.
+    """
+
+    SUP_NAMES = ("ISIL_sup", "IC_sup")
+    MEAN_NAMES = ("ISIL_mean", "IC_mean")
+    NAMES = SUP_NAMES + MEAN_NAMES
+
+    @staticmethod
+    def suite(
+        builder: DiagramBuilder,
+        n_instances: int,
+        n_replicates: int = 1,
+        bin_edges: Optional[Dict[str, Any]] = None,
+        rtol: float = 1e-6,
+        atol: float = 1e-12,
+        top_down: Optional[InterventionSampler] = None,
+        bottom_up: Optional[InterventionSampler] = None,
+        extra_resolutions: Optional[Dict[str, Dict[str, Any]]] = None,
+        **overrides,
+    ) -> List[EvaluationTask]:
+        """Build the ISIL_sup, ISIL_mean, IC_sup and IC_mean tasks.
+
+        Args:
+            builder: The diagram builder supplying the high- and low-level paths.
+            n_instances: Number of cells to sample.
+            n_replicates: Draws per cell. 1 is enough for deterministic models.
+            bin_edges: Binning for continuous variables, see `InstanceJSDMetric`.
+            rtol: Relative tolerance when comparing single draws.
+            atol: Absolute tolerance when comparing single draws.
+            top_down: Sampler for ISIL cells (default `TopDownSampler`).
+            bottom_up: Sampler for IC cells (default `BottomUpSampler`).
+            extra_resolutions: Optional `{suffix: bin_edges}`. Adds four tasks per
+                entry (`ISIL_sup_<suffix>`, ...) scored on the same draws.
+            **overrides: Extra `EvaluationTask` fields for all tasks.
+
+        Returns:
+            The tasks. Tasks of the same direction share a sampler, so the engine
+            runs their interventions once.
+        """
+        from .metrics import InstanceJSDMetric
+        from .sampling import BottomUpSampler, RepeatedInterventionSampler, TopDownSampler
+
+        isil_sampler = RepeatedInterventionSampler(top_down or TopDownSampler(builder.vm), n_replicates)
+        ic_sampler = RepeatedInterventionSampler(bottom_up or BottomUpSampler(builder.vm), n_replicates)
+
+        resolutions = {"": bin_edges, **{f"_{k}": v for k, v in (extra_resolutions or {}).items()}}
+        tasks: List[EvaluationTask] = []
+        for res_suffix, edges in resolutions.items():
+            scorer = InstanceJSDMetric(bin_edges=edges, rtol=rtol, atol=atol)
+            for prefix, sampler in (("ISIL", isil_sampler), ("IC", ic_sampler)):
+                for suffix, aggregation in (("sup", "sup"), ("mean", "inst_mean")):
+                    tasks.append(EvaluationTask(
+                        name=f"{prefix}_{suffix}{res_suffix}",
+                        path_a=builder.build_path_standard_high_level_model(),
+                        path_b=builder.build_path_standard_low_level_model(),
+                        scorer=scorer,
+                        sampler=sampler,
+                        aggregation=aggregation,
+                        n_samples=n_instances * n_replicates,
+                        batch_size=n_replicates,
+                        **overrides,
+                    ))
+        return tasks

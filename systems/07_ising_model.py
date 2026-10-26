@@ -44,113 +44,146 @@ logger = logging.getLogger(__name__)
 
 #Core simulation logic (Numba-optimized)
 @njit
-def _compute_forces(positions, grid_size, r0, spring_constant):
-    """Calculates pairwise harmonic spring forces between nearby atoms (within 1.5*r0).
+def _lattice_forces(positions, side, r0, spring_constant):
+    """Harmonic springs of a 2D square lattice, fixed by the lattice topology.
 
-    These are pairwise springs between current near-neighbors, not tethers to fixed
-    lattice sites, so under periodic boundaries global translation/shear are
-    zero-energy modes (atoms are not rigidly anchored to their sites).
+    Each atom is bonded to its 4 nearest neighbors (rest length r0) and its 4 diagonal
+    neighbors (rest length sqrt(2) r0), with periodic boundaries. Without the diagonals
+    the lattice would have no shear stiffness.
     """
     n_atoms = positions.shape[0]
+    box = side * r0
     forces = np.zeros_like(positions)
+    diag = np.sqrt(2.0) * r0
     for i in range(n_atoms):
-        for j in range(i + 1, n_atoms):
+        row, col = i // side, i % side
+        # each bond once: right, down, down-right, down-left
+        for k in range(4):
+            if k == 0:
+                j = row * side + (col + 1) % side
+                rest = r0
+            elif k == 1:
+                j = ((row + 1) % side) * side + col
+                rest = r0
+            elif k == 2:
+                j = ((row + 1) % side) * side + (col + 1) % side
+                rest = diag
+            else:
+                j = ((row + 1) % side) * side + (col - 1 + side) % side
+                rest = diag
             dr = positions[i] - positions[j]
-            # Periodic boundary conditions
             for dim in range(2):
-                if dr[dim] > grid_size / 2: dr[dim] -= grid_size
-                if dr[dim] < -grid_size / 2: dr[dim] += grid_size
-
-            dist = np.sqrt(np.sum(dr**2))
-            # Harmonic pairwise spring between nearby atoms (not a fixed-site tether)
-            if dist < 1.5 * r0:
-                force_mag = -spring_constant * (dist - r0)
-                force_vec = force_mag * (dr / (dist + 1e-9))
-                forces[i] += force_vec
-                forces[j] -= force_vec
+                dr[dim] -= box * np.round(dr[dim] / box)
+            dist = np.sqrt(np.sum(dr ** 2))
+            force_vec = -spring_constant * (dist - rest) * (dr / (dist + 1e-12))
+            forces[i] += force_vec
+            forces[j] -= force_vec
     return forces
+
+
+@njit
+def _nn_distance(positions, i, j, side, r0):
+    box = side * r0
+    dr = positions[i] - positions[j]
+    for dim in range(2):
+        dr[dim] -= box * np.round(dr[dim] / box)
+    return np.sqrt(np.sum(dr ** 2))
+
 
 @njit
 def _run_mc_sweep_distance_dependent(positions, spins, magnetic_temp, field, J0, r0, j_decay, grid_side):
-    """Metropolis sweep where J depends on instantaneous distance."""
+    """Metropolis sweep where J depends on the instantaneous nearest-neighbor distance."""
     n_atoms = spins.shape[0]
     for _ in range(n_atoms):
         i = np.random.randint(n_atoms)
 
-        # Identify neighbors on the theoretical grid
+        # Neighbors on the lattice topology
         row, col = i // grid_side, i % grid_side
-        neighbors = [
+        neighbors = (
             ((row + 1) % grid_side) * grid_side + col,
             ((row - 1 + grid_side) % grid_side) * grid_side + col,
             row * grid_side + ((col + 1) % grid_side),
             row * grid_side + ((col - 1 + grid_side) % grid_side),
-        ]
+        )
 
-        neighbor_interaction_energy = 0
+        local_field = 0.0
         for j in neighbors:
-            dr = positions[i] - positions[j]
-            # Periodic boundary conditions
-            for dim in range(2):
-                if dr[dim] > (grid_side * r0) / 2: dr[dim] -= (grid_side * r0)
-                if dr[dim] < -(grid_side * r0) / 2: dr[dim] += (grid_side * r0)
-
-            dist = np.sqrt(np.sum(dr**2))
-
+            dist = _nn_distance(positions, i, j, grid_side, r0)
             # Physical coupling: interaction strength decays with distance
             J_eff = J0 * np.exp(-j_decay * np.abs(dist - r0))
-            neighbor_interaction_energy += -J_eff * spins[j]
+            local_field += J_eff * spins[j]
 
-        dE = 2 * spins[i] * (-neighbor_interaction_energy + field)
+        # H = -sum J_ij s_i s_j - h sum s_i  ->  flip cost 2 s_i (sum_j J_ij s_j + h)
+        dE = 2 * spins[i] * (local_field + field)
 
-        if magnetic_temp > 1e-9 and (dE < 0 or np.random.rand() < np.exp(-dE / magnetic_temp)):
+        if dE < 0 or (magnetic_temp > 1e-9 and np.random.rand() < np.exp(-dE / magnetic_temp)):
             spins[i] *= -1
-        elif dE < 0:
-            spins[i] *= -1
+
+
+@njit
+def _md_steps(positions, velocities, n_steps, side, r0, spring_constant, mass, dt, vib_temp, gamma):
+    """Velocity Verlet + Langevin thermostat at the vibrational temperature."""
+    c1 = np.exp(-gamma * dt)
+    c2 = np.sqrt((1.0 - c1 ** 2) * vib_temp / mass)
+    forces = _lattice_forces(positions, side, r0, spring_constant)
+    for _ in range(n_steps):
+        velocities += 0.5 * (forces / mass) * dt
+        positions += velocities * dt
+        forces = _lattice_forces(positions, side, r0, spring_constant)
+        velocities += 0.5 * (forces / mass) * dt
+        for a in range(velocities.shape[0]):
+            for d in range(2):
+                velocities[a, d] = c1 * velocities[a, d] + c2 * np.random.normal(0.0, 1.0)
+
 
 @njit
 def _run_md_mc_simulation(grid_side, vibrational_temp, magnetic_temp, field, seed,
-                          J0, r0, j_decay, mass, spring_constant, dt, k_boltzmann,
-                          equil_sweeps, measure_sweeps):
+                          J0, r0, j_decay, mass, spring_constant, dt, md_steps_per_sweep,
+                          gamma, equil_sweeps, measure_sweeps):
     """
-    Interleaves molecular dynamics (vibration) and Monte Carlo (Spin Flip).
+    Interleaves molecular dynamics (thermostatted lattice vibration) and Monte Carlo
+    (spin flips). Returns the mean |magnetization| over the measurement sweeps and the
+    mean nearest-neighbor coupling the spins actually saw.
     """
     np.random.seed(seed)
     n_atoms = grid_side * grid_side
-
     spins = np.ones(n_atoms, dtype=np.int8)
 
     positions = np.zeros((n_atoms, 2))
     for i in range(n_atoms):  # Initialize lattice positions
-        positions[i] = np.array([(i % grid_side) * r0, (i // grid_side) * r0])
-
-    np.random.seed(seed + 1)
+        positions[i, 0] = (i % grid_side) * r0
+        positions[i, 1] = (i // grid_side) * r0
     velocities = np.zeros_like(positions)
+    vibrating = vibrational_temp > 1e-9
+    if vibrating:
+        velocities = np.random.randn(n_atoms, 2) * np.sqrt(vibrational_temp / mass)
+        # thermalize the lattice before the spins start
+        _md_steps(positions, velocities, 20 * md_steps_per_sweep, grid_side, r0,
+                  spring_constant, mass, dt, vibrational_temp, gamma)
 
-    # Initialize velocities if Vib > 0. This consumes RNG and creates a divergence compared to Vib=0 (intended)
-    if vibrational_temp > 1e-9:
-        velocities = np.random.randn(n_atoms, 2) * np.sqrt(k_boltzmann * vibrational_temp / mass)
-
-    # Equilibration
     for _ in range(equil_sweeps):
-        if vibrational_temp > 1e-9:
-            forces = _compute_forces(positions, grid_side * r0, r0, spring_constant)
-            positions += velocities * dt + 0.5 * (forces / mass) * dt**2
-            new_forces = _compute_forces(positions, grid_side * r0, r0, spring_constant)
-            velocities += 0.5 * ((forces + new_forces) / mass) * dt
+        if vibrating:
+            _md_steps(positions, velocities, md_steps_per_sweep, grid_side, r0,
+                      spring_constant, mass, dt, vibrational_temp, gamma)
         _run_mc_sweep_distance_dependent(positions, spins, magnetic_temp, field, J0, r0, j_decay, grid_side)
 
-    # Measurement
-    mags = np.empty(measure_sweeps, dtype=np.float64)
-    for i in range(measure_sweeps):
-        if vibrational_temp > 1e-9:
-            forces = _compute_forces(positions, grid_side * r0, r0, spring_constant)
-            positions += velocities * dt + 0.5 * (forces / mass) * dt**2
-            new_forces = _compute_forces(positions, grid_side * r0, r0, spring_constant)
-            velocities += 0.5 * ((forces + new_forces) / mass) * dt
+    mag_sum = 0.0
+    j_sum = 0.0
+    for _ in range(measure_sweeps):
+        if vibrating:
+            _md_steps(positions, velocities, md_steps_per_sweep, grid_side, r0,
+                      spring_constant, mass, dt, vibrational_temp, gamma)
         _run_mc_sweep_distance_dependent(positions, spins, magnetic_temp, field, J0, r0, j_decay, grid_side)
-        mags[i] = np.abs(np.mean(spins))
+        mag_sum += np.abs(np.mean(spins))
+        # mean coupling over the right/down bonds (each bond once)
+        acc = 0.0
+        for i in range(n_atoms):
+            row, col = i // grid_side, i % grid_side
+            for j in (row * grid_side + (col + 1) % grid_side, ((row + 1) % grid_side) * grid_side + col):
+                acc += J0 * np.exp(-j_decay * np.abs(_nn_distance(positions, i, j, grid_side, r0) - r0))
+        j_sum += acc / (2 * n_atoms)
 
-    return np.mean(mags)
+    return mag_sum / measure_sweeps, j_sum / measure_sweeps
 
 
 @njit
@@ -192,9 +225,22 @@ def _run_rigid_simulation(grid_size, temp, field, J, equil_sweeps, measure_sweep
     return np.mean(mags)
 
 
+def input_seed(*values):
+    """Deterministic seed from the exact float inputs."""
+    words = np.frombuffer(np.asarray(values, dtype=np.float64).tobytes(), dtype=np.uint32)
+    return int(np.random.SeedSequence(words.tolist()).generate_state(1)[0] % (2 ** 31 - 1))
+
+
 # Low-level model
 class MolecularDynamicsIsingModel(LowLevelModel):
-    """Low-level model M: an Ising spin lattice with molecular-dynamics (vibrational) updates."""
+    """Low-level model M: an Ising spin lattice on a vibrating, thermostatted atomic lattice.
+
+    Args:
+        grid_side: Side of the square lattice (grid_side^2 atoms/spins).
+        vibrational_temp: Temperature of the lattice heat bath (fixed; the magnetic
+            temperature is the intervened `Temperature`). 0 freezes the lattice, which
+            makes the model identical to the rigid Ising model.
+    """
 
     def __init__(self, grid_side=8, vibrational_temp=1.0):
         self.grid_side = grid_side
@@ -205,24 +251,12 @@ class MolecularDynamicsIsingModel(LowLevelModel):
             'equil_sweeps': 2000,
             'measure_sweeps': 1000,
             'J0': 1.0, 'r0': 1.0, 'j_decay': 2.0,
-            'mass': 1.0, 'spring_constant': 50.0, 'dt': 0.01, 'k_boltzmann': 1.0
+            'mass': 1.0, 'spring_constant': 50.0, 'dt': 0.02,
+            'md_steps_per_sweep': 5, 'gamma': 1.0,
         }
 
-    def forward_with_interventions(self, input_state: SystemState, interventions: dict) -> SystemState:
-        def get(name, default):
-            val = interventions.get(name, input_state.get(name, default))
-            return val.item() if hasattr(val, 'item') else val
-
-        t = get('Temperature', 0.0)
-        h = get('ExternalField', 0.0)
-
-        # Deterministic seed based on input conditions for reproducibility (common
-        # random numbers across M and E). This depends only on t+h, so distinct
-        # interventions with equal Temperature+ExternalField collide to the same seed.
-        seed = int(round(t, 8) * 1e8) + int(round(h + 10, 8) * 1e8)
-
-        # Run hybrid conditions
-        avg_mag = _run_md_mc_simulation(
+    def _simulate(self, t, h, seed):
+        return _run_md_mc_simulation(
             grid_side=self.grid_side,
             vibrational_temp=self.vibrational_temp,
             magnetic_temp=t,
@@ -230,42 +264,65 @@ class MolecularDynamicsIsingModel(LowLevelModel):
             seed=seed,
             J0=self.params['J0'], r0=self.params['r0'], j_decay=self.params['j_decay'],
             mass=self.params['mass'], spring_constant=self.params['spring_constant'],
-            dt=self.params['dt'], k_boltzmann=self.params['k_boltzmann'],
+            dt=self.params['dt'], md_steps_per_sweep=self.params['md_steps_per_sweep'],
+            gamma=self.params['gamma'],
             equil_sweeps=self.params['equil_sweeps'],
-            measure_sweeps=self.params['measure_sweeps']
+            measure_sweeps=self.params['measure_sweeps'],
         )
 
+    def effective_coupling(self, n_sweeps=500, seed=0):
+        """Mean nearest-neighbor coupling <J0 exp(-decay |d - r0|)> on the vibrating lattice.
+
+        The lattice doesn't feel the spins, so this only depends on the lattice. It is
+        the coupling the rigid model should use if vibrations are fast.
+        """
+        saved = dict(self.params)
+        self.params['equil_sweeps'], self.params['measure_sweeps'] = 0, n_sweeps
+        try:
+            _, j_eff = self._simulate(2.0, 0.0, seed)
+        finally:
+            self.params = saved
+        return float(j_eff)
+
+    def forward_with_interventions(self, input_state: SystemState, interventions: dict,
+                                   rng=None) -> SystemState:
+        def get(name, default):
+            val = interventions.get(name, input_state.get(name, default))
+            return np.atleast_1d(np.asarray(val, dtype=float)).ravel()
+
+        # One simulation per batch element
+        ts, hs = get('Temperature', 0.0), get('ExternalField', 0.0)
+        n = max(len(ts), len(hs))
+        ts, hs = np.broadcast_to(ts, n), np.broadcast_to(hs, n)
+        mags = np.empty(n)
+        for i, (t, h) in enumerate(zip(ts, hs)):
+            seed = int(rng.integers(2 ** 31 - 1)) if rng is not None else input_seed(t, h)
+            mags[i], _ = self._simulate(float(t), float(h), seed)
+
         return input_state.merge(SystemState(values={
-            'Temperature': np.array([t]),
-            'ExternalField': np.array([h]),
-            'PredictedMagnetization': np.array([avg_mag])
+            'Temperature': np.array(ts, dtype=float),
+            'ExternalField': np.array(hs, dtype=float),
+            'PredictedMagnetization': mags
         }))
 
 
 #Main
 def main():
-    """Simulate the Ising model for various vibrational temperatures."""
+    """Effective coupling and magnetization for a few vibrational temperatures."""
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-
-    vibrational_temps = [0, 0.05, 0.1, 0.2]
-    grid_side = 8
-    sample_temps = [1.5, 2.269, 3.5]  # Below, at, and above Curie temperature
-
-    print(f"Ising model simulation (grid={grid_side}x{grid_side})")
-    print(f"{'vib_temp':<12} | {'T=1.5 mag':<12} | {'T=2.27 mag':<12} | {'T=3.5 mag':<12}")
-    print("-" * 55)
-
-    for vib_temp in vibrational_temps:
-        low_level_model = MolecularDynamicsIsingModel(grid_side=grid_side, vibrational_temp=vib_temp)
+    grid_side = 16
+    sample_temps = [1.5, 2.0, 2.5, 3.5]
+    print(f"Ising model on a vibrating lattice (grid={grid_side}x{grid_side})")
+    for vib_temp in [0.0, 0.25, 0.5, 1.0]:
+        m = MolecularDynamicsIsingModel(grid_side=grid_side, vibrational_temp=vib_temp)
+        m.params['equil_sweeps'], m.params['measure_sweeps'] = 500, 1000
+        j_eff = m.effective_coupling()
         mags = []
-        for temp in sample_temps:
-            state = low_level_model.forward_with_interventions(
-                SystemState(values={}),
-                {"Temperature": np.array([[temp]]), "ExternalField": np.array([[0.0]])},
-            )
-            mag = float(np.asarray(state.values.get("PredictedMagnetization", [[0]])).ravel()[0])
-            mags.append(mag)
-        print(f"{vib_temp:<12.3f} | {mags[0]:<12.4f} | {mags[1]:<12.4f} | {mags[2]:<12.4f}")
+        for t in sample_temps:
+            ll = m._simulate(t, 0.0, input_seed(t, 0.0))[0]
+            hl = _run_rigid_simulation(grid_side, t, 0.0, j_eff, 500, 1000, input_seed(t, 1.0))
+            mags.append(f"T={t}: {ll:.3f}/{hl:.3f}")
+        print(f"vib_temp={vib_temp:<5} J_eff={j_eff:.3f}  (vibrating / rigid with J_eff)  " + "  ".join(mags))
 
 
 if __name__ == '__main__':

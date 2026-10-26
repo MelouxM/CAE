@@ -2,9 +2,10 @@
 
 [![PyPI](https://img.shields.io/pypi/v/causal-abstraction-eval.svg)](https://pypi.org/project/causal-abstraction-eval/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![arXiv](https://img.shields.io/badge/arXiv-2607.00267-b31b1b.svg)](https://arxiv.org/abs/2607.00267)
 
 A Python framework for **validating causal abstractions on simulated complex systems**. It accompanies
-the paper *"Validating Causal Abstraction Metrics on Simulated Complex Systems"* and provides a unified
+the paper [*"Validating Causal Abstraction Metrics on Simulated Complex Systems"*](https://arxiv.org/abs/2607.00267) and provides a unified
 implementation of a benchmark of idealized complex systems, their ground-truth abstractions, and a
 large battery of candidate validity metrics including the paper's contribution, the **Causal
 Abstraction Error (CAE)**.
@@ -20,11 +21,12 @@ We reason about complex systems (a neural network, a physics simulation, a digit
 using simplified high-level models. The central question is: *when is a high-level causal model a
 **valid** explanation of a low-level system?*
 
-The framework formalizes this as **constructive causal abstraction**. A low-level structural causal
-model `M` is abstracted by a high-level model `E` through a map `τ` (a variable coarse-graining `a`
-plus per-variable value maps `τ_X`). Validity is tested on the **commuting diagram**: intervening on
-`E` should yield the same result as grounding that intervention into `M`, running `M`, and abstracting
-the result back up.
+The framework formalizes this as **causal abstraction** (a τ-abstraction in the sense of Beckers &
+Halpern, 2019). A low-level structural causal model `M` is abstracted by a high-level model `E` through
+a map `τ` (a coarse-graining `a` that assigns each macro-variable a cell of micro-variables, where cells
+may overlap, plus per-variable value maps `τ_X`). Validity is tested on the **commuting diagram**:
+intervening on `E` should yield the same result as grounding that intervention into `M`, running `M`,
+and abstracting the result back up.
 
 The paper's central metric is the **Causal Abstraction Error (CAE)**, a continuous validity score with
 a built-in faithfulness test over unmapped variables `Φ` (variables claimed to be causally inert
@@ -163,7 +165,9 @@ The library (`causal_abstraction/`) is organized as follows; the canonical publi
     distributions, and the `UNMAPPED` sentinel).
 *   **`schema.py`**: the low-level variable layout (`MicroVariableSchema`, `Variable`,
     `MicroSelector`) and the coarse-graining map `CoarseGrainingMap` (the variable map `a`, which also
-    defines the unmapped set `Φ` and the internal variables).
+    defines the unmapped set `Φ` and the internal variables). Cells may overlap; intervened
+    macro-variables with overlapping cells are grounded together by `ValueMap.ground_joint` when the
+    value map provides it, and otherwise skipped and reported (`overlap_skipped` in the results).
 *   **`valuemap.py`**: the value map `τ_X` (`ValueMap`, `ContinuousValueMap`): `abstract()` lifts
     micro-states to macro-labels, `ground()` does the reverse.
 *   **`models/`**: `high_level.py` defines the high-level SCM `E` (`CausalGraph`); `low_level.py`
@@ -214,3 +218,26 @@ and data under their own licenses: notably, the MOS 6502 system (the `fake6502`,
 `Decoder6502.bin`) and the gene-regulatory-network system (a GINsim
 segment-polarity model). See [`THIRD_PARTY`](THIRD_PARTY) for the per-component
 upstream URLs, pinned versions, and licenses.
+
+### Citation
+
+The paper is available on [arXiv](https://arxiv.org/abs/2607.00267). It has been accepted at:
+
+*   **NeurIPS 2026** (poster): [OpenReview](https://openreview.net/forum?id=q05m7XZ9Y9)
+*   **ICML 2026 Mechanistic Interpretability Workshop** (spotlight; earlier version):
+    [OpenReview](https://openreview.net/forum?id=hpyVULfQjb)
+
+If you use this library or benchmark, please cite:
+
+```bibtex
+@inproceedings{meloux2026validating,
+  title     = {Validating Causal Abstraction Metrics on Simulated Complex Systems},
+  author    = {M{\'e}loux, Maxime and Pimentel, Tiago and Portet, Fran{\c{c}}ois and Peyrard, Maxime},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2026},
+  url       = {https://openreview.net/forum?id=q05m7XZ9Y9},
+  eprint    = {2607.00267},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.LG}
+}
+```

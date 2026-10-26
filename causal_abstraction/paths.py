@@ -10,7 +10,7 @@ import numpy as np
 
 from .config import EvaluationConfig
 from .models.high_level import CausalGraph
-from .models.low_level import LowLevelModel
+from .models.low_level import LowLevelModel, run_low_level_model
 from .primitives import SystemState, UNMAPPED, EmpiricalDistribution, ensure_batch_2d, infer_batch_size, \
     GroundedInterventions, InterventionSpec
 from .schema import CoarseGrainingMap, MicroSelector
@@ -21,8 +21,20 @@ logger = logging.getLogger(__name__)
 PipelineData = Union[Dict[str, Any], SystemState]
 
 
+class OverlapConflict(Exception):
+    """Raised when intervened macro-variables have overlapping cells and no joint grounding.
+
+    Attributes:
+        pairs: The overlapping pairs of macro-variables, as sorted tuples.
+    """
+
+    def __init__(self, pairs):
+        self.pairs = [tuple(p) for p in pairs]
+        super().__init__(f"Overlapping cells intervened together: {self.pairs}")
+
+
 def _selector_width(index, var_dim: int) -> int:
-    """Number of micro-dimensions a ``MicroSelector`` index spans within ``var_dim``."""
+    """Number of micro-dimensions a `MicroSelector` index spans within `var_dim`."""
     if index is None:
         return var_dim
     if isinstance(index, slice):
@@ -55,7 +67,7 @@ class CausalPath:
 
     def execute(self, initial_data: PipelineData,
                 rng: Optional[np.random.Generator] = None) -> PipelineData:
-        """Run each step in sequence, threading ``rng`` through every step.
+        """Run each step in sequence, threading `rng` through every step.
 
         Args:
             initial_data: The starting intervention spec (dict) or SystemState.
@@ -111,12 +123,25 @@ class DiagramBuilder:
         micro-level. In both cases it samples from the subspace of each abstract label
         via ValueMap.ground(), splitting grounded values across MicroSelectors.
 
+        Intervened macro-variables whose cells overlap are grounded together with
+        `ValueMap.ground_joint`, when the value map provides it.
+
         Raises:
             ValueError: In strict_mode, if an abstract variable has no micro-mapping
                 in the CoarseGrainingMap.
+            OverlapConflict: If intervened cells overlap and cannot be grounded jointly.
         """
         low_level_model_interventions = {}
         batch_size = infer_batch_size(intervention_spec)
+
+        conflicts = self.cg.conflicts(a for a in intervention_spec if self.cg.get_micro_vars(a))
+        if conflicts:
+            joint_names = sorted({name for pair in conflicts for name in pair})
+            joint = self._ground_joint(intervention_spec, joint_names, batch_size, rng)
+            if joint is None:
+                raise OverlapConflict(conflicts)
+            low_level_model_interventions.update(joint)
+            intervention_spec = {k: v for k, v in intervention_spec.items() if k not in joint_names}
 
         pending_writes = {}
 
@@ -138,11 +163,11 @@ class DiagramBuilder:
             elif 'labels' in data:
                 labels = data['labels']
                 if batch_size > 1:
-                    grounded = [self.vm.ground(aname, lbl) for lbl in labels]
+                    grounded = [self.vm.ground(aname, lbl, rng=rng) for lbl in labels]
                     val = np.stack(grounded)
                 else:
                     labels = labels[0]
-                    val = self.vm.ground(aname, labels)
+                    val = self.vm.ground(aname, labels, rng=rng)
                     if val.ndim == 0:
                         val = val.reshape(1, 1)
                     elif val.ndim == 1:
@@ -171,12 +196,34 @@ class DiagramBuilder:
         # Finalize interventions
         for base_var, updates in pending_writes.items():
             # updates is list of (index, val)
+            if base_var in low_level_model_interventions:
+                # Already written by a joint grounding: keep it, then apply the rest
+                updates = [(None, low_level_model_interventions[base_var])] + updates
             if len(updates) == 1 and updates[0][0] is None:
                 low_level_model_interventions[base_var] = updates[0][1]
             else:
                 low_level_model_interventions[base_var] = updates
 
         return low_level_model_interventions
+
+    def _ground_joint(self, intervention_spec, names, batch_size, rng):
+        """Ground overlapping macro-variables with `ValueMap.ground_joint`, sample by sample.
+
+        Returns:
+            `{micro-variable: (batch, dim) array}`, or None if the value map has no joint
+            grounding or the cells were given micro-values (bottom-up).
+        """
+        if any(intervention_spec[n].get('micro_values') is not None for n in names):
+            return None
+        per_sample = []
+        for i in range(batch_size):
+            labels = {n: intervention_spec[n]['labels'][i] for n in names}
+            grounded = self.vm.ground_joint(labels, rng=rng)
+            if grounded is None:
+                return None
+            per_sample.append(grounded)
+        return {var: np.stack([np.atleast_1d(np.asarray(g[var], dtype=float)) for g in per_sample])
+                for var in per_sample[0]}
 
     def _add_pending_write(self, pending, selector, val):
         if selector.variable not in pending:
@@ -187,8 +234,8 @@ class DiagramBuilder:
                                rng: Optional[np.random.Generator] = None, batch_size=None) -> 'GroundedInterventions':
         """Injects noise into Phi (unmapped) variables.
 
-        Each Phi element is either a whole-variable name (``str``) or a
-        :class:`MicroSelector` pointing at the unmapped dimensions of a partially
+        Each Phi element is either a whole-variable name (`str`) or a
+        `MicroSelector` pointing at the unmapped dimensions of a partially
         mapped variable. A whole-variable element overwrites the variable with
         noise; a selector element writes noise into only its indices, merged with
         (rather than clobbering) any grounded mapped dimensions of the same
@@ -229,12 +276,12 @@ class DiagramBuilder:
                 var_noise = rng.normal(0, noise_std, size=(batch_size, width))
 
             if index is None:
-                # Whole-variable Phi: overwrite the variable with noise.
+                # Whole-variable Phi: overwrite the variable with noise
                 new_interventions[var_name] = var_noise
             else:
                 # Partial Phi: write noise into only the unmapped indices, layering
                 # it on top of any grounded mapped dimensions already present as a
-                # list of (index, value) writes.
+                # list of (index, value) writes
                 existing = new_interventions.get(var_name)
                 if isinstance(existing, list):
                     merged = list(existing)
@@ -252,7 +299,7 @@ class DiagramBuilder:
                           rng: Optional[np.random.Generator] = None) -> SystemState:
         """Execute the low-level model M under the grounded interventions."""
         base_state = SystemState()
-        result = self.low_level_model.forward_with_interventions(base_state, low_level_model_interventions)
+        result = run_low_level_model(self.low_level_model, base_state, low_level_model_interventions, rng=rng)
         # Normalize all array outputs to (batch, *features)
         normalized = {}
         for k, v in result.values.items():
@@ -391,8 +438,8 @@ class DiagramBuilder:
     def _build_high_level_model_only(self, name: str) -> CausalPath:
         """Path p: evaluate the high-level model E under do(nu).
 
-        Shared by CAE_up and CAE_down. The phi-dummy key ``'_phi'`` is not in
-        ``high_level_model.variables``, so :meth:`_step_high_level_model_predict`
+        Shared by CAE_up and CAE_down. The phi-dummy key `'_phi'` is not in
+        `high_level_model.variables`, so `_step_high_level_model_predict`
         silently ignores it (faithfulness interventions pass through harmlessly).
         """
         return CausalPath(

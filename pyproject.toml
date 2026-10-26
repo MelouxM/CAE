@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "causal_abstraction_eval"
-version = "1.0.0"
+version = "1.1.0"
 description = "A framework for evaluating the validity of causal abstractions in complex systems."
 readme = "README.md"
 authors = [

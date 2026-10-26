@@ -8,7 +8,7 @@ from importlib.metadata import PackageNotFoundError, version as _version
 
 try:
     # Read from the installed distribution metadata (distribution name
-    # "causal_abstraction_eval"); pyproject.toml is the single source of truth.
+    # "causal_abstraction_eval"); pyproject.toml is the single source of truth
     __version__ = _version("causal_abstraction_eval")
 except PackageNotFoundError:  # running from an un-installed source checkout
     __version__ = "0.0.0+unknown"
@@ -45,6 +45,7 @@ from .metrics import (
     NMSEMetric,
     R2Metric,
     JSDivergenceMetric,
+    InstanceJSDMetric,
     KLDivergenceMetric,
     PrecisionMetric,
     MMDMetric,
@@ -57,15 +58,16 @@ from .metrics import (
     get_metric,
 )
 from .models.high_level import CausalGraph
-from .models.low_level import LowLevelModel, NoisyLowLevelModel
+from .models.low_level import LowLevelModel, NoisyLowLevelModel, run_low_level_model
 # NeuralModel is imported lazily (see __getattr__ below) so that a bare
-# `import causal_abstraction` does not eagerly load torch.
+# `import causal_abstraction` does not eagerly load torch
 from .paths import DiagramBuilder, CausalPath
 from .primitives import SystemState, AbstractVariable, ProbabilityDistribution, EmpiricalDistribution, UNMAPPED, \
     DiscreteDistribution
 from .sampling import (
     TopDownSampler, BottomUpSampler, InterventionSampler,
     PairedSampler, NoisyMeasurementSampler, CombinedFaithfulnessSampler,
+    RepeatedInterventionSampler,
     PHI_DUMMY_NAME,
 )
 from .schema import MicroVariableSchema, CoarseGrainingMap, MicroSelector, Variable
@@ -74,7 +76,7 @@ from .spaces.base import (
     ComplementSubspace, FullSubspace, UniformSubspace,
     GaussianSubspace
 )
-from .tasks import StandardTasks, EvaluationTask, TaskResults
+from .tasks import StandardTasks, ZennaroTasks, EvaluationTask, TaskResults
 from .valuemap import ValueMap, ContinuousValueMap
 
 __all__ = [
@@ -107,10 +109,12 @@ __all__ = [
     "PairedSampler",
     "NoisyMeasurementSampler",
     "CombinedFaithfulnessSampler",
+    "RepeatedInterventionSampler",
     "PHI_DUMMY_NAME",
     # Models
     "LowLevelModel",
     "NoisyLowLevelModel",
+    "run_low_level_model",
     "CausalGraph",
     "NeuralModel",
     # Spaces
@@ -134,6 +138,7 @@ __all__ = [
     "NMSEMetric",
     "R2Metric",
     "JSDivergenceMetric",
+    "InstanceJSDMetric",
     "KLDivergenceMetric",
     "PrecisionMetric",
     "MMDMetric",
@@ -163,6 +168,7 @@ __all__ = [
     "RelationalFidelityMetric",
     # Tasks
     "StandardTasks",
+    "ZennaroTasks",
     "EvaluationTask",
     "TaskResults",
 ]
@@ -170,7 +176,7 @@ __all__ = [
 
 def __getattr__(name):
     # PEP 562 lazy attribute access: defer the torch import behind
-    # NeuralModel so a bare `import causal_abstraction` stays lightweight.
+    # NeuralModel so a bare `import causal_abstraction` stays lightweight
     if name == "NeuralModel":
         from .models.neural import NeuralModel
         return NeuralModel

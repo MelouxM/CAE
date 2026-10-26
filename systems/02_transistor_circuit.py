@@ -126,13 +126,12 @@ class GenericSpiceModel(LowLevelModel):
         # Drive nodes
         for node, val in current_vals.items():
             if node not in ['0', 'gnd', 'vdd']:  # Don't drive ground/VDD
-                try:
-                    circuit.V(f'drive_{node}', node, circuit.gnd, float(val) @ u_V)
-                except:
-                    pass
+                circuit.V(f'drive_{node}', node, circuit.gnd, float(val) @ u_V)
 
         simulator = circuit.simulator(temperature=25, nominal_temperature=25)
         analysis = simulator.operating_point()
+        # ngspice keeps every circuit and plot in memory unless we free them
+        ngspice = getattr(simulator, '_ngspice_shared', None) or getattr(simulator, 'ngspice', None)
 
         results = {}
         for name in self.all_nodes:
@@ -144,6 +143,9 @@ class GenericSpiceModel(LowLevelModel):
             else:
                 results[name] = np.zeros((1, 1))  # (1, 1)
 
+        if ngspice is not None:
+            ngspice.destroy()
+            ngspice.remove_circuit()
         del simulator, analysis, circuit
 
         return input_state.merge(SystemState(values=results))
@@ -151,7 +153,7 @@ class GenericSpiceModel(LowLevelModel):
 
 def run_full_suite(*args, **kwargs):
     """Deprecated shim. Run the evaluation suite from the command line instead:
-    ``python test/02_transistor_circuit.py`` (built on ``test/runner.run_suite``)."""
+    `python test/02_transistor_circuit.py` (built on `test/runner.run_suite`)."""
     raise RuntimeError(
         "run_full_suite is not available here; run the transistor evaluation "
         "suite directly with `python test/02_transistor_circuit.py`."

@@ -29,18 +29,21 @@ from causal_abstraction.analytical_metrics import (
 from causal_abstraction.tasks import StandardTasks
 from runner import Condition, run_suite
 
-RESULTS_FILE = Path(__file__).parent / "results" / "03_gas_simulation_results.json"
+# Particle number, 128 by default. GAS_N=512 writes to a separate results file
+N_PARTICLES  = int(os.environ.get("GAS_N", _gs.N_PARTICLES))
+RESULTS_FILE = Path(__file__).parent / "results" / (
+    "03_gas_simulation_results.json" if N_PARTICLES == _gs.N_PARTICLES
+    else f"03_gas_simulation_N{N_PARTICLES}_results.json")
 N_SAMPLES    = 10
 CONDITIONS   = ["valid_ideal", "valid_vdw", "invalid_alpha", "invalid_density", "invalid_temp"]
 OUTPUTS      = ["pressure"]
 COMPARISONS  = [
     ("valid_ideal", "invalid_alpha",   "ideal gas -> wrong alpha"),
     ("valid_ideal", "invalid_density", "ideal gas -> high density"),
-    ("valid_vdw",   "invalid_density", "VdW -> high density"),
+    ("valid_vdw",   "invalid_density", "VdW (dilute) -> ideal gas at high density"),
     ("valid_ideal", "invalid_temp",    "ideal gas -> low temp"),
 ]
 
-N_PARTICLES  = _gs.N_PARTICLES
 T_BOYLE      = _gs.T_BOYLE
 LOW_RHO, HIGH_RHO = 0.05, 0.70
 MED_TEMP, LOW_TEMP = T_BOYLE, 1.0
@@ -72,13 +75,7 @@ class GasBottomUpSampler(BottomUpSampler):
             rho = float(rng.uniform(*self.rho_range))
             t   = float(rng.uniform(*self.t_range))
             box = float((self.n_particles / rho) ** (1.0 / 3.0))
-            k   = int(np.ceil(self.n_particles ** (1.0 / 3.0)))
-            s   = box / k
-            grd = np.arange(k) * s
-            x, y, z = np.meshgrid(grd, grd, grd)
-            pos = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T[:self.n_particles]
-            pos += rng.normal(0.0, s * 0.05, size=pos.shape)
-            pos = _gs.minimize_energy(pos, self.n_particles, box) % box
+            pos = _gs.make_initial_positions(self.n_particles, box, rng)
             vel = rng.normal(0.0, np.sqrt(t), size=(self.n_particles, 3))
             vel -= vel.mean(axis=0)
             pos_l.append(pos); vel_l.append(vel); box_l.append(box)
@@ -127,8 +124,8 @@ def _make_vdw_high_level_model(a, b, v_sp, t_sp):
 
 
 def _build_tasks(builder, vm, bu, high_level_model):
-    td = _gs.ThermodynamicSampler(vm)
-    td_roots = _gs.ThermodynamicSampler(vm)
+    td = _gs.ThermodynamicSampler(vm, n_particles=N_PARTICLES)
+    td_roots = _gs.ThermodynamicSampler(vm, n_particles=N_PARTICLES)
     td_roots._root_vars_only = [v for n, v in high_level_model.variables.items()
                                  if not high_level_model._nodes.get(n, {}).get("parents")]
     return [
@@ -178,7 +175,7 @@ def _build_analytical(cond, a_vdw, b_vdw, v_sp, t_sp):
 
 # Calibrate VdW once
 print("Calibrating VdW parameters (loads cached result if available)...")
-_A_VDW, _B_VDW = _gs.perform_full_calibration(_gs.UniversalGasModel())
+_A_VDW, _B_VDW = _gs.perform_full_calibration(_gs.UniversalGasModel(n_particles=N_PARTICLES))
 print(f"  VdW: a={_A_VDW:.4f}, b={_B_VDW:.4f}\n")
 
 
@@ -189,7 +186,7 @@ def build_condition(cond: str, run_index: int) -> Condition:
     high_level_model = (_make_vdw_high_level_model(_A_VDW, _B_VDW, v_sp, t_sp) if use_vdw
             else _make_ideal_high_level_model(alpha, v_sp, t_sp))
 
-    low_level_model = _gs.UniversalGasModel()
+    low_level_model = _gs.UniversalGasModel(n_particles=N_PARTICLES)
 
     seed = run_index * len(CONDITIONS) + CONDITIONS.index(cond)
     cfg  = EvaluationConfig(metric="mse", seed=seed)

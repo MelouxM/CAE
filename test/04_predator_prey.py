@@ -51,6 +51,7 @@ from causal_abstraction.metrics import (
     TrajectoryMSEMetric,
 )
 from causal_abstraction.primitives import SystemState
+from causal_abstraction.models.low_level import run_low_level_model
 from causal_abstraction.schema import Variable
 from causal_abstraction.tasks import StandardTasks
 from runner import Condition, run_suite
@@ -89,13 +90,8 @@ _IDEAL_CONFIG = dict(
 )
 _LOW_LEVEL_MODEL_IDEAL = _pp.AgentBasedModel(_IDEAL_CONFIG)
 
-_SEARCH_SPACE = {
-    "alpha": np.linspace(0.08, 0.12, 3),
-    "beta":  np.linspace(0.0008, 0.0012, 3),
-    "delta": np.linspace(0.0004, 0.0006, 3),
-    "gamma": np.linspace(0.04, 0.06, 3),
-}
-_HIGH_LEVEL_MODEL_PARAMS = _pp.calibrate_high_level_model(_LOW_LEVEL_MODEL_IDEAL, _SEARCH_SPACE)
+# The ideal ABM is the Euler discretization of LV, so its parameters are known exactly
+_HIGH_LEVEL_MODEL_PARAMS = _pp.lv_params_from_config(_IDEAL_CONFIG)
 
 _PREY_DOM = RectSubspace((50, 250))
 _PRED_DOM = RectSubspace((20, 100))
@@ -150,21 +146,23 @@ def _lv_trajectory(prey_0, pred_0, params, n_epochs):
     return np.array(traj, dtype=float)
 
 
-def _abm_trajectory(low_level_model, prey_0, pred_0, n_epochs):
+def _abm_trajectory(low_level_model, prey_0, pred_0, n_epochs, rng=None):
     traj  = [[prey_0, pred_0]]
     state = SystemState(
         values={"prey_t": np.array([prey_0]), "predator_t": np.array([pred_0])}
     )
     for _ in range(n_epochs):
         if hasattr(low_level_model, "step"):
-            state = low_level_model.step(state)
+            state = low_level_model.step(state, rng=rng)
         else:
-            state = low_level_model.forward_with_interventions(
+            state = run_low_level_model(
+                low_level_model,
                 SystemState(),
                 {
                     "prey_t":     state.values["prey_t"],
                     "predator_t": state.values["predator_t"],
                 },
+                rng=rng,
             )
             pops = np.asarray(state.values["final_populations"]).ravel()
             state.values["prey_t"]     = np.array([float(pops[0])])
@@ -222,7 +220,7 @@ class _PPTemporalMetric(AnalyticalMetric):
             p0  = float(rng.uniform(50, 250))
             pr0 = float(rng.uniform(20, 100))
             lv  = _lv_trajectory(p0, pr0, self.high_level_model_params, self.n_epochs)
-            abm = _abm_trajectory(low_level_model, p0, pr0, self.n_epochs)
+            abm = _abm_trajectory(low_level_model, p0, pr0, self.n_epochs, rng=rng)
             refs.append(self._compute_ref_scale(lv))
             try:
                 s = self._score_trajectories(lv, abm)

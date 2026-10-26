@@ -1,19 +1,17 @@
 """
-Characterization tests for the commuting-diagram machinery (``paths.py``).
+Characterization tests for the commuting-diagram machinery (`paths.py`).
 
-``DiagramBuilder`` / ``CausalPath`` compose the abstraction (``tau``),
-grounding (the inverse value map ``tau^{-1}``), the low-level model ``M``,
-the high-level model ``E`` and Phi-noise steps that the Causal Abstraction
-Error is built from. They were previously exercised only indirectly through one
-engine test; this module drives the individual path steps and the assembled
-paths directly on the canonical fast triple (the 2-bit adder ``logic_system``
-fixture).
+`DiagramBuilder` / `CausalPath` compose the abstraction (`tau`),
+grounding (the inverse value map `tau^{-1}`), the low-level model `M`,
+the high-level model `E` and Phi-noise steps that the Causal Abstraction
+Error is built from. These tests run the path steps and the assembled paths on the
+2-bit adder (`logic_system` fixture).
 
 These are characterization tests: every assertion pins the
-current observed behaviour (snapshot), never a "corrected" value, so they add
+current observed behavior (snapshot), never a "corrected" value, so they add
 a regression net without changing any metric or reported number. Values that are
 not deterministic across processes (subspace-sampled grounding; Phi-noise draw
-order, which depends on set-iteration order of ``phi_variables``) are pinned only
+order, which depends on set-iteration order of `phi_variables`) are pinned only
 by their guaranteed-stable properties (in-range membership, shape/dtype, and
 same-seed reproducibility), while the genuinely reproducible cases (single Phi
 variable, pure high-level prediction) are pinned exactly.
@@ -50,7 +48,7 @@ _EXPECTED_LABELS = {
 
 
 def _builder(logic_system, model=None, config=None):
-    """Construct a ``DiagramBuilder`` exactly as ``EvaluationEngine`` does."""
+    """Construct a `DiagramBuilder` exactly as `EvaluationEngine` does."""
     return DiagramBuilder(
         model or logic_system["valid"],
         logic_system["low_level"],
@@ -61,10 +59,10 @@ def _builder(logic_system, model=None, config=None):
 
 
 def _phi_builder(logic_system, phi_specs):
-    """A builder whose CoarseGrainingMap has the given ``(name, dtype)`` Phi vars.
+    """A builder whose CoarseGrainingMap has the given `(name, dtype)` Phi vars.
 
-    Only ``_step_inject_phi_noise`` is exercised on it; that step reads solely
-    ``self.cg`` and ``self.config``, so reusing the fixture's models/value-map
+    Only `_step_inject_phi_noise` is exercised on it; that step reads solely
+    `self.cg` and `self.config`, so reusing the fixture's models/value-map
     against an unrelated schema is sound and keeps the noise test self-contained.
     """
     schema = MicroVariableSchema(
@@ -83,12 +81,12 @@ def _f(x):
 
 
 def _ints(out):
-    """Collapse a path/step output (``{var: [label, ...]}``, batch 1) to ints."""
+    """Collapse a path/step output (`{var: [label, ...]}`, batch 1) to ints."""
     return {k: int(np.asarray(v[0]).ravel()[0]) for k, v in out.items()}
 
 
 def _canon(out):
-    """Like ``_ints`` but maps UNMAPPED/None to a sentinel for comparison."""
+    """Like `_ints` but maps UNMAPPED/None to a sentinel for comparison."""
     def c(x):
         if x is UNMAPPED or x is None:
             return "EMPTY"
@@ -157,7 +155,7 @@ def test_ground_or_passthrough_micro_values_split(logic_system):
     g = b._step_ground_or_passthrough(
         {"Operand_A": {"micro_values": np.array([[0.95, 0.05]])}}
     )
-    # Two selectors, last dim == 2 -> split element-wise (deterministic passthrough).
+    # Two selectors, last dim == 2 -> split element-wise (deterministic passthrough)
     assert np.asarray(g["A0"]).ravel().tolist() == [0.95]
     assert np.asarray(g["A1"]).ravel().tolist() == [0.05]
 
@@ -166,7 +164,7 @@ def test_ground_or_passthrough_unknown_var_strict_vs_lenient(logic_system):
     strict = _builder(logic_system, config=EvaluationConfig(metric="hard", strict_mode=True))
     with pytest.raises(ValueError):
         strict._step_ground_or_passthrough({"NoSuchVar": {"labels": [0]}})
-    # Non-strict: unmappable abstract var is skipped, yielding no interventions.
+    # Non-strict: unmappable abstract var is skipped, yielding no interventions
     lenient = _builder(logic_system)
     assert lenient._step_ground_or_passthrough({"NoSuchVar": {"labels": [0]}}) == {}
 
@@ -181,7 +179,7 @@ def test_low_level_execute_runs_mechanism_and_normalizes(logic_system):
         "C0": np.array([[0.0]]),
     })
     assert isinstance(st, SystemState)
-    # A=3, B=0, Cin=0 -> sum 3 (S0=1, S1=1), no carry out (C2=0), internal C1=0.
+    # A=3, B=0, Cin=0 -> sum 3 (S0=1, S1=1), no carry out (C2=0), internal C1=0
     for wire in ("S0", "S1", "C2", "C1"):
         assert np.asarray(st[wire]).shape == (1, 1)
     assert _f(st["S0"]) == 1.0
@@ -238,7 +236,7 @@ def test_high_level_predict_all_none_labels_skipped(logic_system):
         {"Operand_A": {"labels": [2]}, "Operand_B": {"labels": [1]},
          "Carry_In": {"labels": [None]}}
     )
-    # An all-None label set is treated as "not provided": identical predictions.
+    # An all-None label set is treated as "not provided": identical predictions
     assert _canon(all_none) == _canon(omitted)
 
 
@@ -272,7 +270,7 @@ def test_phi_noise_is_reproducible_and_typed(logic_system):
     (bool, [False, False, False]),
 ])
 def test_phi_noise_exact_single_variable(logic_system, dtype, expected):
-    # One Phi variable -> draw order is unambiguous, so exact values are stable.
+    # One Phi variable -> draw order is unambiguous, so exact values are stable
     out = _phi_builder(logic_system, [("p", dtype)])._step_inject_phi_noise(
         {}, rng=np.random.default_rng(7), batch_size=3
     )["p"]
@@ -285,10 +283,10 @@ def test_phi_noise_exact_single_variable(logic_system, dtype, expected):
 
 def test_phi_noise_into_partially_mapped_variable_writes_unmapped_dims(logic_system):
     """Partial-mapping Phi: noise is written into only the UNMAPPED dimensions as
-    ``(index, value)`` partial writes, leaving the grounded mapped write intact.
+    `(index, value)` partial writes, leaving the grounded mapped write intact.
 
     Pins the consumer side of the partial-mapping fix: the unmapped dims (2, 3)
-    of ``x`` become per-dimension Phi selectors, and ``_step_inject_phi_noise``
+    of `x` become per-dimension Phi selectors, and `_step_inject_phi_noise`
     layers a noise write for each on top of the existing mapped write for [0:2)."""
     schema = MicroVariableSchema([Variable("x", shape=(4,))])
     cg = CoarseGrainingMap(schema, {"A": [("x", slice(0, 2))]})  # 2/4 dims mapped
@@ -303,9 +301,9 @@ def test_phi_noise_into_partially_mapped_variable_writes_unmapped_dims(logic_sys
 
     writes = out["x"]
     assert isinstance(writes, list)
-    # The grounded mapped write is preserved unchanged.
+    # The grounded mapped write is preserved unchanged
     assert any(w[0] == slice(0, 2) for w in writes)
-    # Each unmapped dim got one (int_index, (batch, 1)) noise write.
+    # Each unmapped dim got one (int_index, (batch, 1)) noise write
     int_writes = [w for w in writes if isinstance(w[0], int)]
     assert sorted(w[0] for w in int_writes) == [2, 3]
     for _, val in int_writes:
@@ -330,7 +328,7 @@ def test_full_paths_commute_on_valid_abstraction(logic_system):
     hl = b.build_path_standard_high_level_model().execute(_ROOT_SPEC, rng=np.random.default_rng(0))
     ll = b.build_path_standard_low_level_model().execute(_ROOT_SPEC, rng=np.random.default_rng(0))
     # The defining property of a valid abstraction: the two paths agree,
-    # p (E on abstracted inputs)  ==  q (tau o M o tau^{-1}).
+    # p (E on abstracted inputs)  ==  q (tau o M o tau^{-1})
     assert _ints(hl) == _EXPECTED_LABELS
     assert _ints(ll) == _EXPECTED_LABELS
 
@@ -341,7 +339,7 @@ def test_combined_path_matches_plain_when_phi_empty(logic_system):
     comb = b.build_path_combined_low_level_model().execute(_ROOT_SPEC, rng=np.random.default_rng(0))
     assert _ints(comb) == _ints(plain) == _EXPECTED_LABELS
     # The PHI sentinel key is stripped before grounding and noise injection is a
-    # no-op when there are no Phi variables, so adding it changes nothing.
+    # no-op when there are no Phi variables, so adding it changes nothing
     spec_phi = dict(_ROOT_SPEC)
     spec_phi[PHI_DUMMY_NAME] = {"labels": [None]}
     comb_phi = b.build_path_combined_low_level_model().execute(spec_phi, rng=np.random.default_rng(0))

@@ -2,11 +2,14 @@
 Unit tests for the intervention samplers.
 
 Covers seeded reproducibility (same seed -> identical interventions), the
-target-selection contract (respecting ``max_interventions`` / ``force_all``),
+target-selection contract (respecting `max_interventions` / `force_all`),
 and the faithfulness sampler's phi-sentinel behavior, including the configurable
-``phi_prob`` inclusion probability wired through
-``EvaluationConfig.phi_selection_prob``.
+`phi_prob` inclusion probability wired through
+`EvaluationConfig.phi_selection_prob`.
 """
+import copy
+from types import SimpleNamespace
+
 import numpy as np
 
 from causal_abstraction import (
@@ -85,10 +88,17 @@ def test_faithfulness_force_all_bypasses_phi(logic_system):
     assert PHI_DUMMY_NAME not in spec
 
 
+def _vm_with_phi(logic_system):
+    """The adder's value map, seen through a coarse-graining map with a non-empty Phi."""
+    vm = copy.copy(logic_system["vm"])
+    vm.cg_map = SimpleNamespace(phi_variables={"unmapped_wire"})
+    return vm
+
+
 def test_phi_selection_probability(logic_system):
     """The configurable phi_prob (EvaluationConfig.phi_selection_prob) gates phi."""
     variables = _variables(logic_system)
-    base = TopDownSampler(logic_system["vm"])
+    base = TopDownSampler(_vm_with_phi(logic_system))
     always = CombinedFaithfulnessSampler(base, phi_prob=1.0)
     never = CombinedFaithfulnessSampler(base, phi_prob=0.0)
     for seed in range(10):
@@ -100,3 +110,19 @@ def test_phi_selection_probability(logic_system):
         assert PHI_DUMMY_NAME not in s_never
         # real intervention targets coexist with the phi sentinel
         assert any(k != PHI_DUMMY_NAME for k in s_always)
+
+
+def test_empty_phi_never_selects_phi(logic_system):
+    """With Phi empty the faithfulness test is vacuous: no phi slot, same draws as the base."""
+    assert not logic_system["cg"].phi_variables
+    variables = _variables(logic_system)
+    base = TopDownSampler(logic_system["vm"])
+    for phi_prob in (None, 1.0):
+        cfs = CombinedFaithfulnessSampler(base, phi_prob=phi_prob)
+        for seed in range(10):
+            spec = cfs.sample_intervention(variables, batch_size=2, max_interventions=2,
+                                           rng=np.random.default_rng(seed))
+            ref = base.sample_intervention(variables, batch_size=2, max_interventions=2,
+                                           rng=np.random.default_rng(seed))
+            assert PHI_DUMMY_NAME not in spec
+            assert _canonical(spec) == _canonical(ref)

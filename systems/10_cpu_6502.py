@@ -31,7 +31,7 @@ from causal_abstraction import (
     AbstractVariable, CausalGraph, ContinuousValueMap, CoarseGrainingMap,
     FullSubspace, LowLevelModel, MicroVariableSchema, RectSubspace, SystemState,
 )
-from causal_abstraction.sampling import InterventionSampler
+from causal_abstraction.sampling import BottomUpSampler, InterventionSampler
 from causal_abstraction.schema import Variable
 
 logger = logging.getLogger(__name__)
@@ -438,6 +438,29 @@ class InstructionSampler(InterventionSampler):
                 "micro_values": None,
             }
 
+        return spec
+
+
+class InstructionBottomUpSampler(BottomUpSampler):
+    """Bottom-up version of `InstructionSampler` (CAE_up).
+
+    Draws a tested opcode, an operand byte and integer register bytes, then
+    abstracts them.
+    """
+
+    def __init__(self, value_map, opcodes=None):
+        super().__init__(value_map)
+        self._draw = InstructionSampler(value_map, opcodes)
+
+    def sample_intervention(self, variables, batch_size=1, max_interventions=None,
+                            force_all=False, rng=None):
+        rng = self._get_rng(rng)
+        spec = self._draw.sample_intervention(variables, batch_size, max_interventions,
+                                              force_all, rng)
+        for name, entry in spec.items():
+            micro = np.asarray(entry["labels"], dtype=float).reshape(-1, 1)
+            entry["micro_values"] = micro
+            entry["labels"] = [self.value_map.abstract(name, v) for v in micro]
         return spec
 
 

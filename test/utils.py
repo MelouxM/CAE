@@ -13,9 +13,7 @@ Provides:
   append_run      - append one run's scores into the accumulator dict
   print_table     - pretty-print a conditions × metrics table with effect sizes
 
-Importing this module also puts the repository root and ``systems/`` on
-``sys.path`` (see :func:`load_system`), so suites no longer each repeat that
-bootstrap.
+Importing this module also puts the repository root and `systems/` on `sys.path`.
 """
 from __future__ import annotations
 
@@ -38,12 +36,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _ensure_repo_paths() -> None:
-    """Put the repo root and ``systems/`` on ``sys.path`` (idempotent).
+    """Put the repo root and `systems/` on `sys.path` (idempotent).
 
-    The evaluation suites run as scripts (``python test/NN_*.py``) and import both
-    the in-place ``causal_abstraction`` package (at the repo root) and sibling
-    benchmark modules (under ``systems/``). Importing this module performs that
-    bootstrap once so the suites don't each repeat the ``sys.path.insert`` dance.
+    The evaluation suites run as scripts (`python test/NN_*.py`) and import both
+    the in-place `causal_abstraction` package (at the repo root) and sibling
+    benchmark modules (under `systems/`). Importing this module performs that
+    bootstrap once so the suites don't each repeat the `sys.path.insert` dance.
     """
     for p in (str(REPO_ROOT), str(REPO_ROOT / "systems")):
         if p not in sys.path:
@@ -56,20 +54,20 @@ _ensure_repo_paths()
 def load_system(filename: str, module_name: Optional[str] = None) -> Any:
     """Import a benchmark system (or sibling script) by file path.
 
-    The benchmark modules use numeric prefixes (``01_logic_circuit.py`` …) that
+    The benchmark modules use numeric prefixes (`01_logic_circuit.py` …) that
     are not importable via normal package mechanics, so every suite loads its
-    matching module by path. This centralizes the ``spec_from_file_location`` /
-    ``module_from_spec`` / ``exec_module`` boilerplate (and the ``sys.path``
+    matching module by path. This centralizes the `spec_from_file_location` /
+    `module_from_spec` / `exec_module` boilerplate (and the `sys.path`
     bootstrap it relies on) that was duplicated across the suites.
 
     It is a pure import-mechanism helper: it changes how a module is loaded,
     never what the loaded module computes.
 
     Args:
-        filename: Path to the ``.py`` file to load. A relative path (e.g.
-            ``"01_logic_circuit.py"`` or ``"09_grn/grn.py"``) is resolved against
-            ``systems/``; an absolute path (e.g. ``TEST_DIR / "03_gas_simulation.py"``)
-            is used as given, so sibling ``test/`` modules can be loaded too.
+        filename: Path to the `.py` file to load. A relative path (e.g.
+            `"01_logic_circuit.py"` or `"09_grn/grn.py"`) is resolved against
+            `systems/`; an absolute path (e.g. `TEST_DIR / "03_gas_simulation.py"`)
+            is used as given, so sibling `test/` modules can be loaded too.
         module_name: Name to assign the loaded module. Defaults to the file stem.
 
     Returns:

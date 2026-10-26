@@ -1,10 +1,10 @@
 """
-Unit tests for the dissimilarity-metric family (``EvaluationMetric``).
+Unit tests for the dissimilarity-metric family (`EvaluationMetric`).
 
 Covers estimator correctness (known closed-form values), metric stability
 (normalized scores stay in [0, 1] and are monotone in the error), and the
-``get_metric`` config dispatch, including the ``'hsic'`` ->
-``ConditionalIndependenceMetric`` indirection.
+`get_metric` config dispatch, including the `'hsic'` ->
+`ConditionalIndependenceMetric` indirection.
 """
 import numpy as np
 import pytest

@@ -33,36 +33,36 @@ class NumpyEncoder(json.JSONEncoder):
 
 class AnalyticalResults(dict):
     """Mapping of analytical-metric name → result from
-    :meth:`~causal_abstraction.engine.EvaluationEngine.run_analytical_metrics`.
+    `run_analytical_metrics`.
 
-    A ``dict`` subclass mapping metric name to value: a successful metric maps to
+    A `dict` subclass mapping metric name to value: a successful metric maps to
     its value (typically a float), and a metric that raised during computation (in
-    non-strict mode) maps to ``{'error': <message>}``.
+    non-strict mode) maps to `{'error': <message>}`.
 
     On top of the mapping it exposes typed failure introspection, so callers do not
-    have to recover failures by sniffing for an ``'error'`` key (which is
+    have to recover failures by sniffing for an `'error'` key (which is
     indistinguishable from a metric that legitimately returns such a dict):
 
-    - :attr:`errors`: ``{name: message}`` for every metric that failed
-    - :attr:`failed`: names of metrics that failed
-    - :attr:`succeeded`: names of metrics that produced a value
-    - :meth:`is_error`: whether a given metric failed
+    - `errors`: `{name: message}` for every metric that failed
+    - `failed`: names of metrics that failed
+    - `succeeded`: names of metrics that produced a value
+    - `is_error`: whether a given metric failed
     """
 
     _ERROR_KEY = "error"
 
     def _set_error(self, name: str, exc: BaseException) -> None:
-        """Record ``name`` as failed using the ``{'error': msg}`` shape."""
+        """Record `name` as failed using the `{'error': msg}` shape."""
         self[name] = {self._ERROR_KEY: str(exc)}
 
     def is_error(self, name: str) -> bool:
-        """True if ``name`` is an error sentinel (``{'error': <message>}``)."""
+        """True if `name` is an error sentinel (`{'error': <message>}`)."""
         value = self.get(name)
         return isinstance(value, dict) and set(value) == {self._ERROR_KEY}
 
     @property
     def errors(self) -> Dict[str, str]:
-        """``{name: message}`` for every metric that errored."""
+        """`{name: message}` for every metric that errored."""
         return {name: self[name][self._ERROR_KEY] for name in self if self.is_error(name)}
 
     @property
@@ -93,24 +93,24 @@ class ExperimentResults:
     config: Optional[EvaluationConfig] = None
 
     def save(self, filepath: str, allow_pickle: bool = False):
-        """Save the manifest to a file (``.json`` or ``.pkl``).
+        """Save the manifest to a file (`.json` or `.pkl`).
 
-        Prefer ``.json``. The ``.pkl`` path uses :mod:`pickle`, whose artifacts are
+        Prefer `.json`. The `.pkl` path uses `pickle`, whose artifacts are
         unsafe to load from untrusted sources, so writing one requires
-        ``allow_pickle=True`` (see :meth:`load`).
+        `allow_pickle=True` (see `load`).
 
         Args:
-            filepath: Destination path; the format is chosen from the ``.json`` /
-                ``.pkl`` suffix.
-            allow_pickle: Required to write a ``.pkl`` file.
+            filepath: Destination path; the format is chosen from the `.json` /
+                `.pkl` suffix.
+            allow_pickle: Required to write a `.pkl` file.
 
         Raises:
-            ValueError: If the extension is unsupported, or it is ``.pkl`` and
-                ``allow_pickle`` is ``False``.
-            TypeError: If this results object was built without a ``config``
-                (``config`` is ``None``); the manifest cannot be serialized
-                without one (``asdict(None)`` fails). The normal engine-produced
-                path always sets ``config``.
+            ValueError: If the extension is unsupported, or it is `.pkl` and
+                `allow_pickle` is `False`.
+            TypeError: If this results object was built without a `config`
+                (`config` is `None`); the manifest cannot be serialized
+                without one (`asdict(None)` fails). The normal engine-produced
+                path always sets `config`.
         """
         path = Path(filepath)
         data = asdict(self)
@@ -134,20 +134,20 @@ class ExperimentResults:
 
     @classmethod
     def load(cls, filepath: str, allow_pickle: bool = False) -> 'ExperimentResults':
-        """Load results from a ``.json`` or ``.pkl`` file.
+        """Load results from a `.json` or `.pkl` file.
 
         Args:
-            filepath: Path to a ``.json`` or ``.pkl`` results file.
-            allow_pickle: ``.pkl`` files are deserialized with :mod:`pickle`, which
+            filepath: Path to a `.json` or `.pkl` results file.
+            allow_pickle: `.pkl` files are deserialized with `pickle`, which
                 can execute arbitrary code during loading. They are therefore
-                rejected unless this is explicitly ``True``. Only enable it for
+                rejected unless this is explicitly `True`. Only enable it for
                 files you created or otherwise trust; for untrusted or shared data
-                use ``.json``, the safe, preferred format for this public API.
+                use `.json`, the safe, preferred format for this public API.
 
         Raises:
-            FileNotFoundError: If ``filepath`` does not exist.
-            ValueError: If the extension is unsupported, or it is ``.pkl`` and
-                ``allow_pickle`` is ``False``.
+            FileNotFoundError: If `filepath` does not exist.
+            ValueError: If the extension is unsupported, or it is `.pkl` and
+                `allow_pickle` is `False`.
         """
         path = Path(filepath)
         if not path.exists():

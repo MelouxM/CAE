@@ -15,9 +15,9 @@ class Variable:
     Attributes:
         name:  Unique identifier used throughout the framework.
         shape: Shape of the variable's value tensor, excluding the batch
-               dimension.  Defaults to ``(1,)`` for scalars.
+               dimension.  Defaults to `(1,)` for scalars.
         dtype: Python type hint used for noise injection and type-specific
-               logic.  Defaults to ``float``.
+               logic.  Defaults to `float`.
 
     Examples:
         Variable("x")                    # scalar float
@@ -51,8 +51,8 @@ class MicroVariableSchema:
     """
     Defines the physical layout of the low-level model.
 
-    Accepts a list of :class:`Variable` objects.  Variables without an
-    explicit shape default to ``(1,)``.
+    Accepts a list of `Variable` objects.  Variables without an
+    explicit shape default to `(1,)`.
 
     Example::
 
@@ -71,16 +71,16 @@ class MicroVariableSchema:
 
     @staticmethod
     def from_names(names: Iterable[str]):
-        """Build a schema of scalar variables (default shape ``(1,)``, dtype ``float``)."""
+        """Build a schema of scalar variables (default shape `(1,)`, dtype `float`)."""
         return MicroVariableSchema([Variable(x) for x in names])
 
     def get_dtype(self, variable: str) -> type:
-        """Return the variable's dtype, or ``float`` if it is not in the schema."""
+        """Return the variable's dtype, or `float` if it is not in the schema."""
         v = self._variables.get(variable)
         return v.dtype if v is not None else float
 
     def get_shape(self, variable: str) -> Tuple[int, ...]:
-        """Return the variable's shape, or ``(1,)`` if it is not in the schema."""
+        """Return the variable's shape, or `(1,)` if it is not in the schema."""
         v = self._variables.get(variable)
         return v.shape if v is not None else (1,)
 
@@ -93,46 +93,60 @@ class MicroVariableSchema:
         return all(sel.variable in self.variable_names for sel in selectors)
 
 
-class CoarseGrainingMap:
-    """The coarse-graining map a: assigns each micro-variable to one macro-variable or to Phi.
+def _merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    """Union of [start, stop) intervals, as sorted disjoint intervals"""
+    merged: List[Tuple[int, int]] = []
+    for start, stop in sorted(intervals):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], stop))
+        else:
+            merged.append((start, stop))
+    return merged
 
-    Maps abstract variable names to disjoint lists of :class:`MicroSelector` and
-    enforces that disjointness. Micro-resources left unmapped form the unmapped set
-    Phi (:attr:`phi_variables`): a fully-unmapped variable is held by name, while
-    the unmapped dimensions of a partially-mapped variable are held as
-    per-dimension :class:`MicroSelector` entries. ``internal_variables`` are
-    causally redundant micro-variables that are part of the mechanism but are not
-    intervened on.
+
+class CoarseGrainingMap:
+    """The coarse-graining map a: assigns micro-variables to macro-variables (cells) or to Phi.
+
+    Maps abstract variable names to lists of `MicroSelector` (their cells). Cells may
+    overlap, i.e. several macro-variables may read the same micro-variables; the
+    overlapping pairs are listed in `overlaps`. Micro-resources used by no cell form
+    the unmapped set Phi (`phi_variables`): a fully-unmapped variable is held by name,
+    while the unmapped dimensions of a partially-mapped variable are held as
+    per-dimension `MicroSelector` entries. `internal_variables` are micro-variables
+    that are part of the mechanism but are not intervened on.
     """
 
     def __init__(self,
                  schema: MicroVariableSchema,
                  mapping: Dict[str, List[Union[str, Tuple[str, Any]]]],
-                 internal_variables: Optional[List[str]] = None):
+                 internal_variables: Optional[List[str]] = None,
+                 allow_overlap: bool = True):
         """
         Args:
             schema: The definition of the low-level model.
             mapping: Keys are abstract names. Values are lists of:
                      - Strings: "layer1" (implies full vector)
                      - Tuples: ("layer1", 2) or ("layer1", slice(0,2))
-            internal_variables: Causally redundant variable names that are part of
-                the mechanism but should not be intervened on.
+            internal_variables: Variable names that are part of the mechanism but
+                should not be intervened on.
+            allow_overlap: If False, cells must be disjoint.
 
         Raises:
             ValueError: If a selector is malformed, references an unknown variable,
-                overlaps another macro-variable's micro-resources (non-disjoint), or
-                lists an internal variable absent from the schema.
+                overlaps another cell while `allow_overlap` is False, or lists an
+                internal variable absent from the schema.
             NotImplementedError: If a selector uses an index type other than int or slice.
         """
         self.schema = schema
         self._fwd_map: Dict[str, List[MicroSelector]] = {}
-        self._inv_map: Dict[MicroSelector, str] = {}
+        self._inv_map: Dict[MicroSelector, List[str]] = {}
         self.phi_variables: Set[Union[str, MicroSelector]] = set()
         self.internal_variables = set(internal_variables) if internal_variables else set()
+        # {frozenset({X, Y}): set of shared micro-variable names}
+        self.overlaps: Dict[frozenset, Set[str]] = {}
 
-        # Track usage to ensure disjointness
-        # Maps variable name -> sorted list of (start, stop) intervals
-        used_micro_resources: Dict[str, List[Tuple[int, int]]] = {}
+        # Maps variable name -> sorted list of (start, stop, abstract name) intervals
+        used_micro_resources: Dict[str, List[Tuple[int, int, str]]] = {}
 
         for abstract_name, raw_selectors in mapping.items():
             selectors = []
@@ -151,9 +165,6 @@ class CoarseGrainingMap:
             if not self.schema.validate(selectors):
                 raise ValueError(f"Abstract var '{abstract_name}' maps to unknown variables.")
 
-            # Disjointness check
-            import bisect
-
             for sel in selectors:
                 var = sel.variable
                 var_dim = self.schema.resolve_dim(var)
@@ -169,36 +180,25 @@ class CoarseGrainingMap:
                 else:
                     raise NotImplementedError("Only int and slice indices supported for overlap check.")
 
-                # Initialize list for this variable if not exists
-                if var not in used_micro_resources:
-                    used_micro_resources[var] = []
-
-                existing = used_micro_resources[var]
-
-                # O(log n) overlap check using sorted intervals
-                if existing:
-                    # Locate the intervals that could overlap [req_start, req_stop)
-                    starts = [s for s, e in existing]
-                    idx = bisect.bisect_left(starts, req_stop)
-
-                    # Check intervals that could overlap: the one before idx and at idx
-                    for i in range(max(0, idx - 1), min(idx + 1, len(existing))):
-                        occ_start, occ_stop = existing[i]
-                        # Interval intersection test
-                        if max(req_start, occ_start) < min(req_stop, occ_stop):
+                existing = used_micro_resources.setdefault(var, [])
+                for occ_start, occ_stop, occ_name in existing:
+                    if max(req_start, occ_start) < min(req_stop, occ_stop):
+                        if not allow_overlap or occ_name == abstract_name:
                             raise ValueError(
                                 f"Overlap detected in '{var}': Requested [{req_start}:{req_stop}] "
                                 f"conflicts with existing [{occ_start}:{occ_stop}]"
                             )
-
-                # Insert maintaining sorted order
-                bisect.insort(existing, (req_start, req_stop))
-                used_micro_resources[var] = existing
+                        self.overlaps.setdefault(frozenset((abstract_name, occ_name)), set()).add(var)
+                existing.append((req_start, req_stop, abstract_name))
 
             # Build forward and inverse maps
             self._fwd_map[abstract_name] = selectors
             for sel in selectors:
-                self._inv_map[sel] = abstract_name
+                self._inv_map.setdefault(sel, []).append(abstract_name)
+
+        if self.overlaps:
+            logger.info("Overlapping cells: %s",
+                        {"/".join(sorted(k)): sorted(v) for k, v in self.overlaps.items()})
 
         # Identify phi (unmapped) variables
         all_micro = self.schema.variable_names
@@ -211,8 +211,7 @@ class CoarseGrainingMap:
                 continue
 
             var_dim = self.schema.resolve_dim(var)
-            intervals = used_micro_resources[var]  # sorted, disjoint [start, stop)
-            # Calculate total coverage
+            intervals = _merge_intervals([(a, b) for a, b, _ in used_micro_resources[var]])
             covered = sum(stop - start for start, stop in intervals)
 
             if covered >= var_dim:
@@ -221,7 +220,7 @@ class CoarseGrainingMap:
                 partially_mapped.add(var)
                 # Unmapped dimensions of a partially-mapped variable are treated
                 # as Phi: one int selector per unmapped index, kept hashable and
-                # matching the (index, value) intervention-write format.
+                # matching the (index, value) intervention-write format
                 mapped_idx = set()
                 for start, stop in intervals:
                     mapped_idx.update(range(start, stop))
@@ -245,5 +244,13 @@ class CoarseGrainingMap:
             raise ValueError(f"Internal variables not in schema: {invalid}")
 
     def get_micro_vars(self, abstract_name: str) -> List[MicroSelector]:
-        """Return the selectors mapped to ``abstract_name`` (empty list if unknown)."""
+        """Return the selectors mapped to `abstract_name` (empty list if unknown)."""
         return self._fwd_map.get(abstract_name, [])
+
+    def conflicts(self, abstract_names: Iterable[str]) -> List[Tuple[str, str]]:
+        """Pairs among `abstract_names` whose cells overlap (sorted, empty if none)."""
+        if not self.overlaps:
+            return []
+        names = sorted(set(abstract_names))
+        return [(x, y) for i, x in enumerate(names) for y in names[i + 1:]
+                if frozenset((x, y)) in self.overlaps]

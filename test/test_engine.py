@@ -1,12 +1,12 @@
 """
-End-to-end unit tests for ``EvaluationEngine`` on a tiny real abstraction
+End-to-end unit tests for `EvaluationEngine` on a tiny real abstraction
 (the 2-bit adder logic circuit).
 
 Covers the three core properties of the unit suite at the
 engine level: a correct (valid) abstraction scores ~0 under CAE (estimator
 correctness), repeated seeded runs are bit-identical (reproducibility of
 baseline results), and an invalid abstraction scores strictly higher
-(discrimination, the core estimator behaviour).
+(discrimination, the core estimator behavior).
 """
 from causal_abstraction import (
     BottomUpSampler,

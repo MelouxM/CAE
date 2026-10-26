@@ -19,11 +19,14 @@ from causal_abstraction import (
     ConditionalIndependenceMetric, RelationalFidelityMetric,
     MacroscopicInvarianceMetric, DCCMetric,
 )
-from causal_abstraction.tasks import StandardTasks
+from causal_abstraction.tasks import StandardTasks, ZennaroTasks
 from runner import Condition, run_suite
 
 RESULTS_FILE = Path(__file__).parent / "results" / "01_logic_circuit_results.json"
 N_SAMPLES    = 1000
+# ISIL/IC: number of cells, and draws per cell (the noise condition is stochastic)
+ISIL_IC_N    = 1000
+ISIL_IC_REPS = {"noise": 20}
 CONDITIONS   = ["valid", "fail", "inv_internal", "noise"]
 OUTPUTS      = ["Result_Sum", "Result_Carry"]
 COMPARISONS  = [
@@ -46,10 +49,12 @@ _HIGH_LEVEL_MODELS = {
 }
 
 
-def _build_tasks(builder, vm):
+def _build_tasks(builder, vm, cond="valid"):
     td = TopDownSampler(vm)
     bu = BottomUpSampler(vm)
-    return [
+    return ZennaroTasks.suite(
+        builder, n_instances=ISIL_IC_N, n_replicates=ISIL_IC_REPS.get(cond, 1),
+    ) + [
         StandardTasks.score(builder, sampler=td,  name="CAE_down_nf"),
         StandardTasks.score(builder, sampler=bu,  name="CAE_up_nf"),
         StandardTasks.score(builder, sampler=td, name="CAE_down", include_faithfulness=True),
@@ -92,7 +97,7 @@ def build_condition(cond: str, run_index: int) -> Condition:
 
     return Condition(
         engine=engine,
-        tasks=_build_tasks(engine.builder, _VM),
+        tasks=_build_tasks(engine.builder, _VM, cond),
         analytical=_build_analytical(),
         sampler=BottomUpSampler(_VM),
         task_kwargs=dict(n_samples=N_SAMPLES, batch_size=10, max_interventions=2),

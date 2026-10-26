@@ -12,8 +12,8 @@ from .valuemap import ValueMap
 class InterventionSampler(ABC):
     """Base interface for sampling interventions over abstract variables.
 
-    Concrete samplers (:class:`TopDownSampler`, :class:`BottomUpSampler`, and the
-    wrappers below) implement :meth:`sample_intervention`; the choice of sampler is
+    Concrete samplers (`TopDownSampler`, `BottomUpSampler`, and the
+    wrappers below) implement `sample_intervention`; the choice of sampler is
     what distinguishes CAE_down (top-down) from CAE_up (bottom-up).
     """
 
@@ -27,7 +27,7 @@ class InterventionSampler(ABC):
                             max_interventions: Optional[int] = None,
                             force_all: bool = False,
                             rng: Optional[np.random.Generator] = None) -> Dict[str, Any]:
-        """Sample an intervention spec over a random subset of ``variables``.
+        """Sample an intervention spec over a random subset of `variables`.
 
         Args:
             variables: Candidate abstract variables to intervene on.
@@ -38,7 +38,7 @@ class InterventionSampler(ABC):
 
         Returns:
             A spec mapping each intervened variable name to
-            ``{'labels': [...], 'micro_values': ndarray | None}``.
+            `{'labels': [...], 'micro_values': ndarray | None}`.
         """
         pass
 
@@ -154,6 +154,50 @@ class BottomUpSampler(InterventionSampler):
         return intervention_spec
 
 
+class RepeatedInterventionSampler(InterventionSampler):
+    """
+    Wraps a sampler so that a batch repeats one intervention `batch_size` times.
+
+    Useful with a stochastic low-level model, to get several draws of the same cell.
+
+    Args:
+        base_sampler: The sampler drawing the cell.
+        n_replicates: Default replicate count (the engine's `batch_size` wins).
+    """
+
+    def __init__(self, base_sampler: InterventionSampler, n_replicates: int = 1):
+        super().__init__(base_sampler.value_map)
+        self.base_sampler = base_sampler
+        self.n_replicates = n_replicates
+
+    def sample_intervention(
+        self,
+        variables: List[AbstractVariable],
+        batch_size: int = 1,
+        max_interventions: Optional[int] = None,
+        force_all: bool = False,
+        rng: Optional[np.random.Generator] = None,
+    ) -> Dict[str, Any]:
+        rng = self._get_rng(rng)
+        spec = self.base_sampler.sample_intervention(
+            variables, 1, max_interventions, force_all, rng
+        )
+        if batch_size == 1:
+            return spec
+
+        repeated: Dict[str, Any] = {}
+        for var_name, entry in spec.items():
+            labels = entry.get('labels')
+            micro = entry.get('micro_values')
+            new_labels = [labels[0]] * batch_size if labels is not None else None
+            new_micro = (
+                np.repeat(np.asarray(micro)[:1], batch_size, axis=0)
+                if micro is not None else None
+            )
+            repeated[var_name] = {'labels': new_labels, 'micro_values': new_micro}
+        return repeated
+
+
 class NoisyMeasurementSampler(InterventionSampler):
     """
     Wraps any InterventionSampler and corrupts the sampled micro-values with
@@ -166,7 +210,7 @@ class NoisyMeasurementSampler(InterventionSampler):
         base_sampler: The sampler to wrap.
         noise_std: Standard deviation of the noise.
         noise_vars: Abstract variable names to corrupt. None = all sampled variables.
-        noise_type: ``'gaussian'`` adds N(0, noise_std²) noise; ``'relative'`` adds
+        noise_type: `'gaussian'` adds N(0, noise_std²) noise; `'relative'` adds
             N(0, (noise_std · |x|)²) noise.
     """
 
@@ -213,8 +257,8 @@ class PairedSampler(InterventionSampler):
     Samples two independent intervention specs from the same abstract cells.
 
     Used by IIA (interchange intervention accuracy), BCC, and DCC metrics.
-    Produces a pair of specs under the keys ``'_pair_a'`` and ``'_pair_b'``
-    together with a ``'_is_paired': True`` flag.
+    Produces a pair of specs under the keys `'_pair_a'` and `'_pair_b'`
+    together with a `'_is_paired': True` flag.
 
     The IIA/BCC path steps in paths.py know how to unpack this format.
 
@@ -235,7 +279,7 @@ class PairedSampler(InterventionSampler):
         rng: Optional[np.random.Generator] = None,
     ) -> Dict[str, Any]:
         rng = self._get_rng(rng)
-        # Use distinct sub-streams for the two halves so they are independent.
+        # Use distinct sub-streams for the two halves so they are independent
         ss = np.random.SeedSequence(int(rng.integers(2**32)))
         rng_a, rng_b = (np.random.default_rng(s) for s in ss.spawn(2))
 
@@ -253,34 +297,25 @@ class CombinedFaithfulnessSampler(InterventionSampler):
     Extends any base sampler by adding a phi-dummy target to the intervention pool.
 
     When the phi dummy is selected as one of the intervention targets, a
-    ``'_phi'`` key is added to the returned spec. The combined low-level model path
-    (see :meth:`DiagramBuilder.build_path_combined_low_level_model`) detects this key
+    `'_phi'` key is added to the returned spec. The combined low-level model path
+    (see `DiagramBuilder.build_path_combined_low_level_model`) detects this key
     and injects phi-variable noise, effectively merging the standard CAE_up/CAE_down
     check with an inline faithfulness test.
 
-    The phi sentinel's inclusion probability is controlled by ``phi_prob``:
+    How often phi is picked is set by `phi_prob`:
 
-    * ``phi_prob=None`` (default) uses pool-based selection: for each
-      iteration, :func:`_select_targets` randomly draws up to ``max_interventions``
-      variables from the pool of ``len(variables) + 1`` candidates (the +1 being
-      the phi dummy), so phi's inclusion probability is implicit (it depends on the
-      pool size and ``max_interventions``).
-    * ``phi_prob`` set to a float in ``[0, 1]`` selects the real intervention
-      targets from ``variables`` as usual and then includes the phi sentinel
-      independently with exactly that probability (a Bernoulli draw). This exposes
-      the "configurable probability" described in the paper and is wired through
-      :attr:`~causal_abstraction.config.EvaluationConfig.phi_selection_prob`.
-
-    The caller sees a mix of pure CAE_up/CAE_down interventions and interventions
-    that also inject phi noise.
+    - `None` (default): phi is one more candidate in the pool of targets, so its
+      probability depends on the pool size and `max_interventions`.
+    - a float in [0, 1]: targets are drawn as usual, then phi is added with that
+      probability.
 
     Args:
         base_sampler: The underlying sampler that handles real high-level model variables.
         phi_prob: Explicit inclusion probability for the phi sentinel (see above).
-            ``None`` keeps the implicit pool-based behavior.
+            `None` keeps the implicit pool-based behavior.
 
     Note:
-        Background sampling (``force_all=True``) bypasses the phi dummy so that
+        Background sampling (`force_all=True`) bypasses the phi dummy so that
         context variables are sampled normally.
     """
 
@@ -299,17 +334,17 @@ class CombinedFaithfulnessSampler(InterventionSampler):
     ) -> Dict[str, Any]:
         rng = self._get_rng(rng)
 
-        # Background / context sampling, do not inject phi
-        if force_all:
+        # No phi for background sampling, or when there is nothing unmapped to test
+        if force_all or not self.value_map.cg_map.phi_variables:
             return self.base_sampler.sample_intervention(variables, batch_size, max_interventions, force_all, rng)
 
         if self.phi_prob is not None:
             # Explicit configurable inclusion probability for the phi sentinel:
-            # draw the real targets normally, then add phi with prob phi_prob.
+            # draw the real targets normally, then add phi with prob phi_prob
             real_targets = self._select_targets(list(variables), max_interventions, force_all, rng)
             phi_selected = bool(rng.random() < self.phi_prob)
         else:
-            # Pool-based selection: phi is one extra candidate in a pool of len(variables)+1.
+            # Pool-based selection: phi is one extra candidate in a pool of len(variables)+1
             phi_var = AbstractVariable(name=PHI_DUMMY_NAME, distribution={True: 1.0})
             extended = list(variables) + [phi_var]
             targets = self._select_targets(extended, max_interventions, force_all, rng)

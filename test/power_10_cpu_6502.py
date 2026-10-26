@@ -7,7 +7,7 @@ from utils import load_system
 
 _cpu = load_system("10_cpu_6502.py", "cpu_6502")
 
-from causal_abstraction import EvaluationConfig, EvaluationEngine, BottomUpSampler
+from causal_abstraction import EvaluationConfig, EvaluationEngine
 from causal_abstraction.tasks import StandardTasks
 from power_runner import run_power_suite, parse_power_args
 from runner import Condition
@@ -71,7 +71,7 @@ def _verify_once():
 
 def _build_tasks(builder):
     s  = _cpu.InstructionSampler(_VM)
-    bu = BottomUpSampler(_VM)
+    bu = _cpu.InstructionBottomUpSampler(_VM)
     return [
         StandardTasks.score(builder, sampler=s,  name="CAE_down_nf"),
         StandardTasks.score(builder, sampler=bu, name="CAE_up_nf"),
@@ -94,7 +94,7 @@ def build_condition(cond: str, run_index: int) -> Condition:
         low_level_model = _transistor()
     else:
         high_level_model = _cpu.build_isa_high_level_model(_isa())
-        low_level_model = _cpu.BrokenGateSimulator(_gate())
+        low_level_model = _cpu.StuckA7Simulator(_gate())
     engine = EvaluationEngine(high_level_model, low_level_model, _VM, _CG, cfg)
     return Condition(
         engine=engine,

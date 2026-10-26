@@ -18,6 +18,7 @@ from causal_abstraction import (
     MicroVariableSchema, CoarseGrainingMap, ValueMap, ContinuousValueMap,
     RectSubspace, FullSubspace, AbstractVariable,
 )
+from causal_abstraction.models.low_level import run_low_level_model
 from causal_abstraction.schema import Variable
 
 
@@ -36,7 +37,7 @@ class ConfounderPPModel(LowLevelModel):
 
     At resource_level = 0 the prey output is unchanged (equilibrium).
     At resource_level != 0 the prey count is scaled by
-    ``1 + resource_effect * resource_level``.
+    `1 + resource_effect * resource_level`.
 
     Args:
         base_model: The underlying predator-prey ABM.
@@ -47,10 +48,10 @@ class ConfounderPPModel(LowLevelModel):
         self.base = base_model
         self.resource_effect = resource_effect
 
-    def forward_with_interventions(self, input_state, interventions):
+    def forward_with_interventions(self, input_state, interventions, rng=None):
         clean = {k: v for k, v in interventions.items() if k != "resource_level"}
 
-        result = self.base.forward_with_interventions(input_state, clean)
+        result = run_low_level_model(self.base, input_state, clean, rng=rng)
 
         # Resolve resource_level
         if "resource_level" in interventions:
@@ -104,7 +105,8 @@ class XORBackupLowLevelModel(LowLevelModel):
         x_raw = interventions.get("x", input_state.get("x", np.array([[0.0]])))
         x = np.atleast_2d(np.asarray(x_raw, dtype=float))
 
-        a = x.copy()
+        # The mediator a copies x unless it is intervened on
+        a = np.atleast_2d(np.asarray(interventions.get("a", x.copy()), dtype=float))
 
         # b1, b2 default to x (same value -> XOR = 0)
         b1 = np.atleast_2d(np.asarray(
@@ -409,14 +411,17 @@ def build_threshold_cg(schema):
 
 
 def build_threshold_vm(cg):
-    bit = {0: RectSubspace((-0.5, 0.5)), 1: RectSubspace((0.5, 1.5))}
+    # x, m, z are integer-valued. X's cells are half-width so that m = 2x stays in the
+    # M cell the high-level model predicts
+    x_labels = {0: RectSubspace((-0.25, 0.25)), 1: RectSubspace((0.75, 1.25))}
     m_labels = {
         0: RectSubspace((-0.5, 0.5)),
         1: RectSubspace((0.5, 1.5)),
         2: RectSubspace((1.5, 2.5)),
         3: RectSubspace((2.5, 3.5)),
     }
-    return ValueMap(cg, {"X": bit, "M": m_labels, "Z": bit})
+    z_labels = {0: RectSubspace((-0.5, 0.5)), 1: RectSubspace((0.5, 1.5))}
+    return ValueMap(cg, {"X": x_labels, "M": m_labels, "Z": z_labels})
 
 
 def build_valid_threshold_high_level_model():

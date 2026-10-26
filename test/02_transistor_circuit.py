@@ -18,11 +18,13 @@ from causal_abstraction import (
     ConditionalIndependenceMetric, RelationalFidelityMetric, MacroscopicInvarianceMetric,
     DCCMetric,
 )
-from causal_abstraction.tasks import StandardTasks
+from causal_abstraction.tasks import StandardTasks, ZennaroTasks
 from runner import Condition, run_suite
 
 RESULTS_FILE = Path(__file__).parent / "results" / "02_transistor_circuit_results.json"
 N_SAMPLES    = 250
+# ISIL/IC: same number of cells as CAE, one draw per cell (the SPICE model can't do batches)
+ISIL_IC_N    = N_SAMPLES
 CONDITIONS   = ["valid", "fail", "noise"]
 OUTPUTS      = ["sum", "carry"]
 COMPARISONS  = [
@@ -57,7 +59,7 @@ def _make_high_level_model(sum_fn, carry_fn):
 def _build_tasks(builder):
     td = TopDownSampler(HA_VM)
     bu = BottomUpSampler(HA_VM)
-    return [
+    return ZennaroTasks.suite(builder, n_instances=ISIL_IC_N) + [
         StandardTasks.score(builder, sampler=td,  name="CAE_down_nf"),
         StandardTasks.score(builder, sampler=bu,  name="CAE_up_nf"),
         StandardTasks.score(builder, sampler=td, name="CAE_down", include_faithfulness=True),

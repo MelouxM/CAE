@@ -36,7 +36,10 @@ DT = T_MAX / STEPS
 _LOW_LEVEL_MODEL = _h.BrownianParticleSystem(n_particles=N_PART, n_steps=STEPS, diff_coeff=ALPHA, box_len=L, dt=DT)
 _SCHEMA = MicroVariableSchema.from_names(["T_initial", "T_final"])
 _CG = CoarseGrainingMap(_SCHEMA, {k: [k] for k in _SCHEMA.variable_names})
-_VM = _h.BinningValueMap(_CG, {"T_initial": {0: FullSubspace(BINS)}, "T_final": {0: FullSubspace(BINS)}},
+# T_initial's micro-domain is the particle cloud itself (N positions in [0, L]), so bottom-up
+# samples are valid micro-states; T_final is never sampled (output only)
+_VM = _h.BinningValueMap(_CG, {"T_initial": {0: _h.ParticleCloudSubspace(N_PART, L)},
+                               "T_final": {0: FullSubspace(BINS)}},
                          n_bins=BINS, box_len=L, n_particles=N_PART)
 _SAMPLER = _h.SmoothProfileSampler(_VM, BINS)
 

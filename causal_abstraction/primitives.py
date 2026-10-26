@@ -68,7 +68,7 @@ class DiscreteDistribution(ProbabilityDistribution):
     probs: Dict[StateLabel, float]
 
     def sample(self, n: int = 1, rng: Optional[np.random.Generator] = None) -> np.ndarray:
-        """Draw ``n`` labels according to the probability table.
+        """Draw `n` labels according to the probability table.
 
         Probabilities that sum to a value other than 1 (within tolerance) are
         renormalized with a warning.
@@ -94,7 +94,7 @@ class DiscreteDistribution(ProbabilityDistribution):
             p = p / total_p
 
         out = rng.choice(labels, size=n, p=p)
-        # Preserve numeric dtype when labels are numeric to avoid object arrays downstream.
+        # Preserve numeric dtype when labels are numeric to avoid object arrays downstream
         if all(isinstance(l, (int, float, np.integer, np.floating)) for l in labels):
             out = out.astype(float)
         return out
@@ -231,7 +231,7 @@ def ensure_batch_2d(val):
 def infer_batch_size(spec: dict, default: int = 1) -> int:
     """
     Infer the batch size from an intervention spec dictionary, returning
-    ``default`` if no batch dimension can be detected.
+    `default` if no batch dimension can be detected.
 
     This is the single source of truth for batch-size inference in the engine's
     path steps. Low-level model implementations receive raw interventions and may

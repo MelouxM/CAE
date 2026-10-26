@@ -5,7 +5,7 @@ The key challenge in this abstraction is handling internal mechanisms: intermedi
 that are essential for computation but are "implementation details" not present in the high-level model.
 
 Low-level model:
-- A simulation of a 2-bit adder circuit using logic gates with continuous, noisy voltage states.
+- A gate-level simulation of a 2-bit adder (wires read as voltages, thresholded at 0.5).
 - Variables: Inputs (A0-1, B0-1, C0), Output (S0-1, C2), and internal gates (XOR, AND outputs).
 
 High-level model:
@@ -22,9 +22,12 @@ Value map:
 Experiment structure:
 - Valid abstraction: correct high-level model
 - Failing abstraction: high-level model uses OR instead of XOR for the sum bit (incorrect logic).
+  Its carry is written with OR, (a&b)|(c&(a|b)), which is still the correct (majority) carry,
+  so only the sum is wrong.
 - Inverted internal: high-level model inverts Internal_Carries but compensates downstream,
   so final I/O is correct but intermediate state is wrong.
-- Noise experiment: correct high-level model, noisy low-level model (Gaussian noise on wire voltages).
+- Noise experiment: correct high-level model, noisy low-level model (Gaussian measurement noise
+  on the wire voltages read out, added after the gates are evaluated).
 """
 import numpy as np
 
@@ -238,7 +241,7 @@ def build_failing_high_level_model():
     def carries_logic(Operand_A, Operand_B, Carry_In):
         a0 = (Operand_A >> 0) & 1
         b0 = (Operand_B >> 0) & 1
-        return (a0 & b0) | (Carry_In & (a0 | b0))  # OR instead of XOR
+        return (a0 & b0) | (Carry_In & (a0 | b0))  # OR instead of XOR (still the majority carry)
 
     high_level_model.add_variable("Internal_Carries", carries_logic,
                      parents=["Operand_A", "Operand_B", "Carry_In"],
